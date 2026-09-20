@@ -19,10 +19,10 @@ interface GameStore {
   reconcile: (now: number) => void;
   persist: () => Promise<void>;
   setSpeed: (speed: Speed) => void;
-  assign: (sessionId: number, ticketId: string, modelId: string, improveBrief: boolean) => void;
-  review: (reviewId: string, decision: ReviewDecision) => void;
-  compact: (sessionId: number) => void;
-  purchase: (upgradeId: string) => void;
+  assign: (sessionId: number, ticketId: string, modelId: string, improveBrief: boolean) => string | null;
+  review: (reviewId: string, decision: ReviewDecision) => string | null;
+  compact: (sessionId: number) => string | null;
+  purchase: (upgradeId: string) => string | null;
   dismissNotice: () => void;
   exportSave: () => string;
   importSave: (serialised: string) => Promise<void>;
@@ -35,13 +35,16 @@ function messageFrom(error: unknown) {
 }
 
 export const useGameStore = create<GameStore>((set, get) => {
-  const commit = (command: (state: GameState) => GameState) => {
+  const commit = (command: (state: GameState) => GameState): string | null => {
     try {
       const next = command(get().game);
       set({ game: next, notice: null });
       void saveGame(next);
+      return null;
     } catch (error) {
-      set({ notice: messageFrom(error) });
+      const message = messageFrom(error);
+      set({ notice: message });
+      return message;
     }
   };
 

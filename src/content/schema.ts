@@ -51,7 +51,7 @@ export const UpgradeSchema = z.object({
   description: z.string(),
   cost: z.number().positive(),
   unlockAfter: z.number().int().nonnegative(),
-  effect: z.enum(["briefing", "tests", "isolation", "observability", "handoff", "quota"]),
+  effect: z.enum(["briefing", "tests", "isolation", "observability", "handoff", "quota", "dashboard"]),
 });
 
 export type ProviderDefinition = z.infer<typeof ProviderSchema>;
