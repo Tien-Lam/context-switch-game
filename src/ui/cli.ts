@@ -250,6 +250,8 @@ function muxStatus(state: GameState) {
     "TERMINAL CAPABILITIES",
     "  [ready]  Anthill Code session       tab 1 · full window",
     "  [ready]  OpenMind Forge session     tab 2 · full window",
+    `  ${shipped >= 1 ? "[ready]" : "[locked]"} parallel execution          ${shipped >= 1 ? "2 agent slots" : "ship 1 ticket"}`,
+    `  ${shipped >= 3 ? "[ready]" : "[locked]"} third execution slot        ${shipped >= 3 ? "3 agent slots" : "ship 3 tickets"}`,
     `  ${shipped >= 1 ? "[ready]" : "[locked]"} extra provider sessions     ${shipped >= 1 ? "tab new anthill|openmind" : "ship 1 ticket"}`,
     `  ${shipped >= 2 ? "[ready]" : "[locked]"} named workspaces            ${shipped >= 2 ? "tab rename" : "ship 2 tickets"}`,
     `  ${shipped >= 3 ? "[ready]" : "[locked]"} full-window operations      ${shipped >= 3 ? "watch agents|reviews|quota|events" : "ship 3 tickets"}`,
@@ -275,8 +277,9 @@ function runTicket(state: GameState, context: CliContext, reference?: string, to
   if (!models.some((candidate) => candidate.id === model.id)) return error("model is locked or unknown; use `/model`");
   const improveBrief = tokens.includes("--brief") || /\b(plan|clarify|careful|brief)\b/i.test(naturalPrompt);
   const provider = providerById.get(context.providerId);
+  const eta = Math.max(1, Math.ceil(ticket.duration / model.speed));
   return {
-    messages: [output(`${provider?.shortName ?? "CLI"} · ${ticket.key} → session ${session.id + 1} / ${model.name}${improveBrief ? " / plan first" : ""}`, "muted")],
+    messages: [output(`${provider?.shortName ?? "CLI"} · ${ticket.key} → session ${session.id + 1} / ${model.name}${improveBrief ? " / plan first" : ""} · review ~${eta}s`, "muted")],
     effect: { type: "assign", sessionId: session.id, ticketId: ticket.id, modelId: model.id, improveBrief },
   } satisfies CliResult;
 }

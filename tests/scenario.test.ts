@@ -14,10 +14,12 @@ describe("vertical slice", () => {
       for (const [index, session] of idle.entries()) {
         const ticket = ready[index];
         if (!ticket) break;
-        const model = models.find((candidate) => candidate.tier === ticket.recommendedTier) ?? models[0];
+        const model = [...models]
+          .filter((candidate) => candidate.tier === ticket.recommendedTier)
+          .sort((a, b) => (state.providerQuota[b.providerId] ?? 0) - (state.providerQuota[a.providerId] ?? 0))[0] ?? models[0];
         state = startTicket(state, session.id, ticket.id, model.id, ticket.baseRisk >= 0.35);
       }
-      state = advanceGame(state, 5000);
+      state = advanceGame(state, 20);
       for (const review of [...state.reviews]) {
         state = reviewTicket(state, review.id, "escalate");
       }
@@ -26,5 +28,6 @@ describe("vertical slice", () => {
     expect(state.completedTicketIds).toHaveLength(8);
     expect(state.ending).not.toBeNull();
     expect(state.ending?.scores.reliability).toBeGreaterThan(60);
+    expect(state.gameTime).toBeLessThanOrEqual(160);
   });
 });

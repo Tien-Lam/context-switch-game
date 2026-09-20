@@ -543,15 +543,16 @@ export function App() {
   }, [hydrate, hydrated, persist, pulse, reconcile]);
   useEffect(() => { localStorage.setItem("context-switch-terminal-tabs-v2", JSON.stringify(tabs)); }, [tabs]);
   useEffect(() => {
-    const event = game.events[0];
-    if (!event) return;
-    if (lastEventId.current === null) { lastEventId.current = event.id; return; }
-    if (lastEventId.current !== event.id) {
-      lastEventId.current = event.id;
-      const target = currentTab.kind === "provider" ? activeTabId : tabs.find((tab) => tab.kind === "provider")?.id;
-      if (target) appendLines(target, [terminalLine("event", `[${event.tone}] ${event.title}\n${event.message}`)]);
-    }
-  }, [game.events[0]?.id]);
+    const newest = game.events[0];
+    if (!newest) return;
+    if (lastEventId.current === null) { lastEventId.current = newest.id; return; }
+    if (lastEventId.current === newest.id) return;
+    const previousIndex = game.events.findIndex((event) => event.id === lastEventId.current);
+    const fresh = game.events.slice(0, previousIndex >= 0 ? previousIndex : 1).reverse();
+    lastEventId.current = newest.id;
+    const target = currentTab.kind === "provider" ? activeTabId : tabs.find((tab) => tab.kind === "provider")?.id;
+    if (target) appendLines(target, fresh.map((event) => terminalLine("event", `[${event.tone}] ${event.title}\n${event.message}`)));
+  }, [game.events]);
   useEffect(() => { outputRef.current?.scrollTo({ top: outputRef.current.scrollHeight, behavior: "smooth" }); }, [activeTabId, currentTab?.history.length]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -615,7 +616,7 @@ export function App() {
 
         <div className="terminal-contextbar">
           <span><b>$</b> {shellCommand}</span>
-          <span>{activeAgents} agents</span><span>{game.reviews.length} reviews</span><span>{Math.round(game.attention)}% attention</span><span>{game.completedTicketIds.length}/{content.tickets.length} shipped</span>
+          <span>{activeAgents}/{game.unlockedSessions} slots</span><span>{game.reviews.length} reviews</span><span>{Math.round(game.attention)}% attention</span><span>{game.completedTicketIds.length}/{content.tickets.length} shipped</span>
         </div>
 
         <div className={`terminal-workspace ${currentTab.kind === "monitor" ? "tool-view" : `provider-${currentTab.providerId}`}`}>

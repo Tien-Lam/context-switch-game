@@ -82,7 +82,7 @@ function unlockProgression(state: GameState) {
       message: "Your throughput ceiling increased. Your attention did not.",
     });
   }
-  if (complete === 2) {
+  if (complete === BALANCE.secondSessionAfter) {
     addEvent(state, {
       tone: "info",
       title: "Parallel operator seat enabled",
@@ -169,7 +169,7 @@ export function startTicket(
     addEvent(state, {
       tone: "info",
       title: `${ticket.key} → ${model.name}`,
-      message: improveBrief ? "The session started with clarified acceptance criteria." : "The session started with the ticket exactly as written.",
+      message: `${improveBrief ? "The session started with clarified acceptance criteria." : "The session started with the ticket exactly as written."} Estimated review in ${Math.max(1, Math.ceil(ticket.duration / model.speed))}s.`,
     });
   });
 }
@@ -201,7 +201,7 @@ export function advanceGame(source: GameState, elapsedSeconds: number) {
       if (possibleWorkSeconds <= 0.01) {
         if (session.status !== "quota-paused") {
           session.status = "quota-paused";
-          addEvent(state, { tone: "warning", title: `${model.name} hit its limit`, message: "Wait for quota, switch providers on the next task, or improve the quota plan." });
+          addEvent(state, { tone: "warning", title: `${model.name} hit its limit`, message: "Switch provider terminals now or improve the quota plan; waiting is never the intended move." });
         }
         continue;
       }
@@ -211,7 +211,7 @@ export function advanceGame(source: GameState, elapsedSeconds: number) {
       state.stats.quotaSpent += spent;
       session.progress = clamp(session.progress + (possibleWorkSeconds * model.speed) / ticket.duration, 0, 1);
       const decayMultiplier = hasUpgrade(state, "context-notes") ? 0.55 : 1;
-      session.context = clamp(session.context - (possibleWorkSeconds / 60) * model.contextDecay * 10 * decayMultiplier, 0, 100);
+      session.context = clamp(session.context - possibleWorkSeconds * model.contextDecay * BALANCE.contextDecayPerWorkSecond * decayMultiplier, 0, 100);
 
       if (session.progress >= 1) {
         session.status = "awaiting-review";
@@ -236,16 +236,25 @@ export function reviewTicket(source: GameState, reviewId: string, decision: Revi
   const review = source.reviews.find((candidate) => candidate.id === reviewId);
   if (!review) throw new GameRuleError("That review is no longer available.");
   const cost = BALANCE.reviewCosts[decision];
-  if (source.attention < cost) throw new GameRuleError("Not enough attention for that review decision.");
+  const attentionShortfall = Math.max(0, cost - source.attention);
 
   return produce(source, (state) => {
     const index = state.reviews.findIndex((candidate) => candidate.id === reviewId);
     const current = state.reviews[index];
     const session = state.sessions[current.sessionId];
     const ticket = ticketById.get(current.ticketId)!;
-    state.attention -= cost;
-    state.stats.reviewAttentionSpent += cost;
+    state.attention = Math.max(0, state.attention - cost);
+    state.stats.reviewAttentionSpent += Math.min(cost, source.attention);
     state.reviews.splice(index, 1);
+
+    if (attentionShortfall > 0) {
+      state.debt = clamp(state.debt + attentionShortfall * BALANCE.rushedReviewDebtPerPoint, 0, 100);
+      addEvent(state, {
+        tone: "warning",
+        title: `${ticket.key} review rushed`,
+        message: `You shipped the decision ${Math.ceil(attentionShortfall)} attention short. Momentum stayed high; hidden risk and debt did too.`,
+      });
+    }
 
     if (decision === "revise") {
       state.stats.revisions += 1;
@@ -265,7 +274,8 @@ export function reviewTicket(source: GameState, reviewId: string, decision: Revi
       return;
     }
 
-    const defect = current.risk >= 0.29 && ticket.riskFlag !== "none";
+    const effectiveRisk = current.risk + attentionShortfall * BALANCE.rushedReviewRiskPerPoint;
+    const defect = effectiveRisk >= 0.29 && ticket.riskFlag !== "none";
     completeTicket(state, session, defect);
   });
 }

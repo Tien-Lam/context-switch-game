@@ -14,6 +14,10 @@ Everything in the game is simulated. It does not call an AI service, connect to 
 
 Run `/help` in either provider session for its command reference and `mux` to inspect terminal unlocks.
 
+## Pacing principle
+
+Waiting is not the challenge. Normal-speed agent runs reach review in roughly 3–16 seconds, with the tutorial completing in about 3 seconds. Parallel execution unlocks after that first shipment. The pressure comes from switching providers before quota becomes a bottleneck, reviewing multiple changes, accepting risky shortcuts, and fixing the consequences quickly. Running out of attention never blocks a review—it converts the shortfall into extra risk and technical debt.
+
 ## Development
 
 ```sh

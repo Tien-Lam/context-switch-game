@@ -7,15 +7,13 @@ test("uses both provider CLIs and completes a ticket from a natural-language pro
   await expect(page.getByRole("tab", { name: /OpenMind Forge/ })).toBeVisible();
   const command = page.getByRole("textbox", { name: "Anthill Code command" });
   await expect(command).toBeVisible();
-  await command.fill("speed 12");
-  await command.press("Enter");
   await command.fill("/model couplet");
   await command.press("Enter");
   await expect(page.getByText("Switched active model to Couplet.")).toBeVisible();
   await command.fill("please implement APP-101");
   await command.press("Enter");
   await expect(page.getByText(/ANT · APP-101/)).toBeVisible();
-  await expect(page.getByText(/APP-101 is ready for review/)).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByText(/APP-101 is ready for review/)).toBeVisible({ timeout: 8_000 });
   await command.fill("reviews approve APP-101");
   await command.press("Enter");
   await expect(page.getByText("APP-101 shipped")).toBeVisible();

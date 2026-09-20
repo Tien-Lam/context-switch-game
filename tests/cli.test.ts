@@ -11,6 +11,7 @@ describe("operator CLI", () => {
 
   it("turns an agent command into a deterministic game action", () => {
     const result = evaluateCommand("agents run APP-101 --model couplet --brief", createInitialState());
+    expect(result.messages[0].text).toContain("review ~3s");
     expect(result.effect).toEqual({
       type: "assign",
       sessionId: 0,
