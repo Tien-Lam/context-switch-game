@@ -36,12 +36,24 @@ function isGameState(value: unknown): value is GameState {
     && Boolean(candidate.providerQuota);
 }
 
+function normaliseGameState(game: GameState): GameState {
+  const legacy = game as GameState & {
+    attention?: number;
+    stats: GameState["stats"] & { reviewAttentionSpent?: number };
+  };
+  const { attention, ...withoutAttention } = legacy;
+  const { reviewAttentionSpent, ...stats } = withoutAttention.stats;
+  void attention;
+  void reviewAttentionSpent;
+  return { ...withoutAttention, stats };
+}
+
 export function parseSave(serialised: string): SaveEnvelope {
   const parsed = JSON.parse(serialised) as Partial<SaveEnvelope>;
   if (parsed.version !== SAVE_VERSION || typeof parsed.savedAt !== "number" || !isGameState(parsed.game)) {
     throw new Error("Unsupported or invalid Context Switch save.");
   }
-  return parsed as SaveEnvelope;
+  return { ...parsed, game: normaliseGameState(parsed.game) } as SaveEnvelope;
 }
 
 export function serialiseSave(game: GameState, savedAt: number): string {
@@ -60,7 +72,7 @@ export async function saveGame(game: GameState, savedAt = Date.now()) {
 export async function loadGame(): Promise<SaveEnvelope | null> {
   try {
     const record = await getDatabase().saves.get(SAVE_ID);
-    if (record && isGameState(record.game)) return record;
+    if (record && isGameState(record.game)) return { ...record, game: normaliseGameState(record.game) };
   } catch {
     // The local-storage snapshot is intentionally the recovery path.
   }

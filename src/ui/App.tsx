@@ -2,7 +2,6 @@ import {
   Activity,
   AlertTriangle,
   Bot,
-  BrainCircuit,
   Check,
   ChevronRight,
   CircleGauge,
@@ -25,6 +24,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { content, modelById, providerById, ticketById } from "../content";
+import { BALANCE } from "../game/balance";
 import { availableModels, availableTickets, ticketProgressLabel } from "../game/selectors";
 import type { GameState, SessionState } from "../game/types";
 import { useGameStore } from "../app/store";
@@ -61,9 +61,10 @@ function StatCard({ icon, label, value, detail, tone = "purple" }: { icon: React
 }
 
 function ResourceBar({ game }: { game: GameState }) {
+  const riskyReviews = game.reviews.filter((review) => review.risk >= 0.29).length;
   return (
     <section className="resource-grid" aria-label="Run resources">
-      <StatCard icon={<BrainCircuit />} label="Attention" value={percent(game.attention)} detail="Your actual bottleneck" />
+      <StatCard icon={<GitPullRequest />} label="Review queue" value={game.reviews.length.toString()} detail={`${riskyReviews} above risk gate`} />
       <StatCard icon={<ShieldCheck />} label="Trust" value={Math.round(game.trust).toString()} detail={`Peak ${Math.round(game.peakTrust)}`} tone="green" />
       <StatCard icon={<HeartPulse />} label="Repo health" value={percent(game.repoHealth)} detail={`${Math.round(game.debt)} debt`} tone="cyan" />
       {content.providers.map((provider) => {
@@ -131,7 +132,7 @@ function SessionCard({ session, game }: { session: SessionState; game: GameState
         {session.status === "awaiting-review" ? (
           <p className="hint"><GitPullRequest /> The implementation is waiting in the review queue.</p>
         ) : (
-          <button className="ghost-button" onClick={() => compact(session.id)} disabled={game.attention < 5}>Compact context · 5 attention</button>
+          <button className="ghost-button" onClick={() => compact(session.id)} disabled={(game.providerQuota[model?.providerId ?? ""] ?? 0) < BALANCE.compactQuotaCost}>Compact context · {BALANCE.compactQuotaCost} quota</button>
         )}
       </article>
     );
@@ -156,7 +157,7 @@ function SessionCard({ session, game }: { session: SessionState; game: GameState
           </label>
           <label className="check-row">
             <input type="checkbox" checked={improveBrief} onChange={(event) => setImproveBrief(event.target.checked)} />
-            Clarify acceptance criteria <span>−8 attention</span>
+            Plan before coding <span>−{BALANCE.improvedBriefQuotaCost} provider quota</span>
           </label>
           <button className="primary-button" onClick={() => assign(session.id, ticketId, modelId, improveBrief)} disabled={!ticketId || !modelId}>
             <Play /> Start agent
@@ -192,21 +193,21 @@ function ReviewQueue({ game }: { game: GameState }) {
   const review = useGameStore((store) => store.review);
   return (
     <section className="panel review-panel">
-      <div className="panel-heading"><div><span className="eyebrow">Human bottleneck</span><h2>Review queue</h2></div><span className={`count-badge ${game.reviews.length > 1 ? "hot" : ""}`}>{game.reviews.length}</span></div>
+      <div className="panel-heading"><div><span className="eyebrow">Decision gate</span><h2>Review queue</h2></div><span className={`count-badge ${game.reviews.length > 1 ? "hot" : ""}`}>{game.reviews.length}</span></div>
       {!game.reviews.length ? <div className="empty-state roomy"><GitPullRequest /><p>No diffs waiting. Enjoy this suspiciously temporary calm.</p></div> : (
         <div className="review-list">
           {game.reviews.map((item) => {
             const ticket = ticketById.get(item.ticketId)!;
-            const riskLabel = item.risk < 0.2 ? "Low risk" : item.risk < 0.42 ? "Needs attention" : "High risk";
+            const riskLabel = item.risk < 0.2 ? "Low risk" : item.risk < 0.42 ? "Inspect signal" : "High risk";
             return (
               <article className="review-card" key={item.id}>
                 <div className="review-top"><div><span className="eyebrow">{ticket.key}</span><h3>{ticket.title}</h3></div><span className={`risk risk-${riskLabel.toLowerCase().replaceAll(" ", "-")}`}>{riskLabel} · {Math.round(item.risk * 100)}%</span></div>
                 <p>{ticket.evidence.summary}</p>
                 <ul className="evidence-list"><li><Check />{ticket.evidence.tests}</li><li><AlertTriangle />{ticket.evidence.signal}</li><li><FileCode2 />{ticket.files.join(" · ")}</li></ul>
                 <div className="review-actions">
-                  <button onClick={() => review(item.id, "approve")}><Check />Approve <span>7</span></button>
-                  <button onClick={() => review(item.id, "revise")}><RefreshCcw />Revise <span>12</span></button>
-                  <button onClick={() => review(item.id, "escalate")}><Sparkles />Escalate <span>18</span></button>
+                  <button onClick={() => review(item.id, "approve")}><Check />Approve <span>ship now</span></button>
+                  <button onClick={() => review(item.id, "revise")}><RefreshCcw />Revise <span>agent pass</span></button>
+                  <button onClick={() => review(item.id, "escalate")}><Sparkles />Escalate <span>−{BALANCE.escalationTrustCost} trust</span></button>
                 </div>
               </article>
             );
@@ -421,7 +422,7 @@ function MonitorPane({ mode, game }: { mode: PaneMode; game: GameState }) {
       <div className="mux-pane-title"><span>watch.{mode}</span><span>LIVE</span></div>
       {mode === "agents" && <div className="watch-list">{game.sessions.slice(0, game.unlockedSessions).map((session) => <div className="watch-row" key={session.id}><span>#{session.id + 1}</span><strong>{session.status}</strong><small>{session.ticketId ? `${ticketById.get(session.ticketId)?.key} · ${Math.round(session.progress * 100)}%` : "idle"}</small><Meter value={session.progress * 100} label={`Session ${session.id + 1}`} /></div>)}</div>}
       {mode === "reviews" && <div className="watch-list">{game.reviews.length ? game.reviews.map((review) => <div className="watch-row" key={review.id}><span>{ticketById.get(review.ticketId)?.key}</span><strong>{Math.round(review.risk * 100)}% risk</strong><small>session {review.sessionId + 1} · awaiting human</small></div>) : <p className="terminal-empty">review queue empty</p>}</div>}
-      {mode === "quota" && <div className="watch-list">{content.providers.map((provider) => <div className="watch-row" key={provider.id}><span>{provider.shortName}</span><strong>{Math.round(game.providerQuota[provider.id] ?? 0)} remaining</strong><Meter value={game.providerQuota[provider.id] ?? 0} max={provider.maxQuota} color={provider.color} label={provider.name} /></div>)}<div className="watch-row"><span>ATTN</span><strong>{Math.round(game.attention)}%</strong><Meter value={game.attention} label="Attention" /></div></div>}
+      {mode === "quota" && <div className="watch-list">{content.providers.map((provider) => <div className="watch-row" key={provider.id}><span>{provider.shortName}</span><strong>{Math.round(game.providerQuota[provider.id] ?? 0)} remaining</strong><Meter value={game.providerQuota[provider.id] ?? 0} max={provider.maxQuota} color={provider.color} label={provider.name} /></div>)}</div>}
       {mode === "events" && <div className="watch-events">{game.events.slice(0, 12).map((event) => <article key={event.id} className={`watch-event event-${event.tone}`}><time>{clock(event.at)}</time><div><strong>{event.title}</strong><p>{event.message}</p></div></article>)}</div>}
     </aside>
   );
@@ -616,7 +617,7 @@ export function App() {
 
         <div className="terminal-contextbar">
           <span><b>$</b> {shellCommand}</span>
-          <span>{activeAgents}/{game.unlockedSessions} slots</span><span>{game.reviews.length} reviews</span><span>{Math.round(game.attention)}% attention</span><span>{game.completedTicketIds.length}/{content.tickets.length} shipped</span>
+          <span>{activeAgents}/{game.unlockedSessions} slots</span><span>{game.reviews.length} reviews</span><span>{Math.round(game.debt)} debt</span><span>{game.completedTicketIds.length}/{content.tickets.length} shipped</span>
         </div>
 
         <div className={`terminal-workspace ${currentTab.kind === "monitor" ? "tool-view" : `provider-${currentTab.providerId}`}`}>

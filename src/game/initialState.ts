@@ -18,7 +18,6 @@ export function createInitialState(): GameState {
   return {
     schemaVersion: 1,
     gameTime: 0,
-    attention: 86,
     trust: 30,
     peakTrust: 30,
     repoHealth: 82,
@@ -41,7 +40,6 @@ export function createInitialState(): GameState {
       escalations: 0,
       defects: 0,
       quotaSpent: 0,
-      reviewAttentionSpent: 0,
     },
     events: [
       {

@@ -67,7 +67,7 @@ function computeEnding(state: GameState): EndingState {
   const title = disciplined ? "The demo works. Suspiciously well." : "The demo works, provided nobody refreshes twice.";
   const message = state.flags.cacheShortcut
     ? "You moved fast, found the stale-data trail, and learned that every shortcut eventually joins the review queue."
-    : "You kept enough attention in reserve to make parallel agents feel like leverage instead of weather.";
+    : "You used the evidence in front of you to make parallel agents feel like leverage instead of weather.";
   return { title, message, scores: { throughput, reliability, trust, debt } };
 }
 
@@ -79,7 +79,7 @@ function unlockProgression(state: GameState) {
     addEvent(state, {
       tone: "good",
       title: `Session ${state.unlockedSessions} unlocked`,
-      message: "Your throughput ceiling increased. Your attention did not.",
+      message: "Your throughput ceiling increased. Quota, context, and review quality now matter more.",
     });
   }
   if (complete === BALANCE.secondSessionAfter) {
@@ -154,8 +154,10 @@ export function startTicket(
   if (session.status !== "idle") throw new GameRuleError("That session is already occupied.");
   if (!availableTickets(source).some((candidate) => candidate.id === ticketId)) throw new GameRuleError("That ticket is not ready.");
   if (!isModelUnlocked(source, modelId)) throw new GameRuleError("That model is not available yet.");
-  if (improveBrief && source.attention < BALANCE.improvedBriefCost) throw new GameRuleError("Not enough attention to improve the brief.");
-  if ((source.providerQuota[model.providerId] ?? 0) < 2) throw new GameRuleError("That provider has no usable quota.");
+  const setupQuota = improveBrief ? BALANCE.improvedBriefQuotaCost : 0;
+  if ((source.providerQuota[model.providerId] ?? 0) < 2 + setupQuota) {
+    throw new GameRuleError(improveBrief ? "That provider lacks the quota to plan before coding." : "That provider has no usable quota.");
+  }
 
   return produce(source, (state) => {
     const target = state.sessions[sessionId];
@@ -165,11 +167,14 @@ export function startTicket(
     target.progress = 0;
     target.reviewRound = 0;
     target.briefImproved = improveBrief;
-    if (improveBrief) state.attention -= BALANCE.improvedBriefCost;
+    if (improveBrief) {
+      state.providerQuota[model.providerId] -= BALANCE.improvedBriefQuotaCost;
+      state.stats.quotaSpent += BALANCE.improvedBriefQuotaCost;
+    }
     addEvent(state, {
       tone: "info",
       title: `${ticket.key} → ${model.name}`,
-      message: `${improveBrief ? "The session started with clarified acceptance criteria." : "The session started with the ticket exactly as written."} Estimated review in ${Math.max(1, Math.ceil(ticket.duration / model.speed))}s.`,
+      message: `${improveBrief ? `The agent spent ${BALANCE.improvedBriefQuotaCost} quota clarifying acceptance criteria before coding.` : "The session started with the ticket exactly as written."} Estimated review in ${Math.max(1, Math.ceil(ticket.duration / model.speed))}s.`,
     });
   });
 }
@@ -180,8 +185,6 @@ export function advanceGame(source: GameState, elapsedSeconds: number) {
 
   return produce(source, (state) => {
     state.gameTime += seconds;
-    state.attention = clamp(state.attention + seconds * BALANCE.attentionRegenPerSecond, 0, BALANCE.attentionMax);
-
     for (const provider of content.providers) {
       state.providerQuota[provider.id] = clamp(
         (state.providerQuota[provider.id] ?? 0) + seconds * provider.regenPerSecond,
@@ -235,26 +238,13 @@ export function advanceGame(source: GameState, elapsedSeconds: number) {
 export function reviewTicket(source: GameState, reviewId: string, decision: ReviewDecision) {
   const review = source.reviews.find((candidate) => candidate.id === reviewId);
   if (!review) throw new GameRuleError("That review is no longer available.");
-  const cost = BALANCE.reviewCosts[decision];
-  const attentionShortfall = Math.max(0, cost - source.attention);
 
   return produce(source, (state) => {
     const index = state.reviews.findIndex((candidate) => candidate.id === reviewId);
     const current = state.reviews[index];
     const session = state.sessions[current.sessionId];
     const ticket = ticketById.get(current.ticketId)!;
-    state.attention = Math.max(0, state.attention - cost);
-    state.stats.reviewAttentionSpent += Math.min(cost, source.attention);
     state.reviews.splice(index, 1);
-
-    if (attentionShortfall > 0) {
-      state.debt = clamp(state.debt + attentionShortfall * BALANCE.rushedReviewDebtPerPoint, 0, 100);
-      addEvent(state, {
-        tone: "warning",
-        title: `${ticket.key} review rushed`,
-        message: `You shipped the decision ${Math.ceil(attentionShortfall)} attention short. Momentum stayed high; hidden risk and debt did too.`,
-      });
-    }
 
     if (decision === "revise") {
       state.stats.revisions += 1;
@@ -268,14 +258,14 @@ export function reviewTicket(source: GameState, reviewId: string, decision: Revi
 
     if (decision === "escalate") {
       state.stats.escalations += 1;
+      state.trust = clamp(state.trust - BALANCE.escalationTrustCost, 0, 100);
       state.debt = clamp(state.debt - 2, 0, 100);
-      addEvent(state, { tone: "good", title: `${ticket.key} escalated`, message: "A deeper review found and corrected the risky path before shipping." });
+      addEvent(state, { tone: "good", title: `${ticket.key} escalated`, message: `A senior review corrected the risky path before shipping. The interruption cost ${BALANCE.escalationTrustCost} trust.` });
       completeTicket(state, session, false);
       return;
     }
 
-    const effectiveRisk = current.risk + attentionShortfall * BALANCE.rushedReviewRiskPerPoint;
-    const defect = effectiveRisk >= 0.29 && ticket.riskFlag !== "none";
+    const defect = current.risk >= 0.29 && ticket.riskFlag !== "none";
     completeTicket(state, session, defect);
   });
 }
@@ -283,13 +273,16 @@ export function reviewTicket(source: GameState, reviewId: string, decision: Revi
 export function compactSession(source: GameState, sessionId: number) {
   const session = source.sessions[sessionId];
   if (!session || (session.status !== "working" && session.status !== "quota-paused")) throw new GameRuleError("Only an active session can be compacted.");
-  if (source.attention < BALANCE.compactAttentionCost) throw new GameRuleError("Not enough attention to compact context.");
+  const model = modelById.get(session.modelId ?? "");
+  if (!model) throw new GameRuleError("That session has no active model.");
+  if ((source.providerQuota[model.providerId] ?? 0) < BALANCE.compactQuotaCost) throw new GameRuleError("That provider lacks the quota to compact this session.");
   return produce(source, (state) => {
     const target = state.sessions[sessionId];
-    state.attention -= BALANCE.compactAttentionCost;
+    state.providerQuota[model.providerId] -= BALANCE.compactQuotaCost;
+    state.stats.quotaSpent += BALANCE.compactQuotaCost;
     target.context = 88;
     target.progress = Math.max(0, target.progress - 0.08);
-    addEvent(state, { tone: "info", title: `Session ${sessionId + 1} compacted`, message: "The summary recovered context but lost a little implementation momentum." });
+    addEvent(state, { tone: "info", title: `Session ${sessionId + 1} compacted`, message: `The summary used ${BALANCE.compactQuotaCost} provider quota, recovered context, and lost a little implementation momentum.` });
   });
 }
 

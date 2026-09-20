@@ -9,6 +9,24 @@ describe("operator CLI", () => {
     expect(result.messages[0].text).toContain("ui/Banner.tsx");
   });
 
+  it("explains review decisions with evidence and concrete tradeoffs", () => {
+    const state = createInitialState();
+    state.reviews.push({ id: "review-1", ticketId: "telemetry-toggle", sessionId: 0, risk: 0.34, createdAt: 4 });
+    const result = evaluateCommand("reviews read APP-118", state);
+
+    expect(result.messages[0].text).toContain("estimated defect risk 34%");
+    expect(result.messages[0].text).toContain("no migration fixture was added");
+    expect(result.messages[0].text).toContain("accept the displayed risk");
+    expect(result.messages[0].text).toContain("more time + quota");
+    expect(result.messages[0].text).toContain("-3 trust");
+  });
+
+  it("shows only concrete provider limits in usage output", () => {
+    const result = evaluateCommand("/usage", createInitialState());
+    expect(result.messages[0].text).toContain("Anthill Code");
+    expect(result.messages[0].text.toLowerCase()).not.toContain("attention");
+  });
+
   it("turns an agent command into a deterministic game action", () => {
     const result = evaluateCommand("agents run APP-101 --model couplet --brief", createInitialState());
     expect(result.messages[0].text).toContain("review ~3s");

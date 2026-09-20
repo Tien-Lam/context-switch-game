@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { advanceGame, reviewTicket, startTicket } from "../src/game/engine";
+import { advanceGame, compactSession, reviewTicket, startTicket } from "../src/game/engine";
+import { BALANCE } from "../src/game/balance";
 import { createInitialState } from "../src/game/initialState";
 import { availableModels } from "../src/game/selectors";
 import { content } from "../src/content";
@@ -25,16 +26,27 @@ describe("agent simulation", () => {
     }
   });
 
-  it("turns exhausted attention into rushed-review debt instead of blocking play", () => {
+  it("lets the player approve directly from review evidence without spending a human resource", () => {
     const assigned = startTicket(createInitialState(), 0, "deployment-banner", "ballad");
     const ready = advanceGame(assigned, 5);
-    const exhausted = { ...ready, attention: 0 };
-    const reviewed = reviewTicket(exhausted, exhausted.reviews[0].id, "approve");
+    const quotaBeforeReview = ready.providerQuota.anthill;
+    const trustBeforeReview = ready.trust;
+    const reviewed = reviewTicket(ready, ready.reviews[0].id, "approve");
 
     expect(reviewed.completedTicketIds).toContain("deployment-banner");
-    expect(reviewed.attention).toBe(0);
-    expect(reviewed.debt).toBeGreaterThan(exhausted.debt);
-    expect(reviewed.events.some((event) => event.title.includes("review rushed"))).toBe(true);
+    expect(reviewed.providerQuota.anthill).toBe(quotaBeforeReview);
+    expect(reviewed.trust).toBeGreaterThan(trustBeforeReview);
+    expect(reviewed.events.some((event) => event.title.includes("review rushed"))).toBe(false);
+  });
+
+  it("charges planning and compaction to the active provider quota", () => {
+    const initial = createInitialState();
+    const assigned = startTicket(initial, 0, "deployment-banner", "ballad", true);
+    expect(assigned.providerQuota.anthill).toBe(initial.providerQuota.anthill - BALANCE.improvedBriefQuotaCost);
+
+    const compacted = compactSession(assigned, 0);
+    expect(compacted.providerQuota.anthill).toBe(assigned.providerQuota.anthill - BALANCE.compactQuotaCost);
+    expect(compacted.sessions[0].context).toBe(88);
   });
 
   it("starts with both providers and unlocks parallel execution after the first shipped ticket", () => {

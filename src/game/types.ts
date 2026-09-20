@@ -34,7 +34,6 @@ export interface GameStats {
   escalations: number;
   defects: number;
   quotaSpent: number;
-  reviewAttentionSpent: number;
 }
 
 export interface EndingState {
@@ -51,7 +50,6 @@ export interface EndingState {
 export interface GameState {
   schemaVersion: 1;
   gameTime: number;
-  attention: number;
   trust: number;
   peakTrust: number;
   repoHealth: number;

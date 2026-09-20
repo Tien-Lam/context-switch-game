@@ -125,7 +125,7 @@ select { width: 100%; border: 1px solid #30323d; background: #0f1015; border-rad
 .review-top h3 { font-size: 13px; margin: 4px 0; }
 .risk { height: fit-content; border-radius: 999px; padding: 4px 7px; font: 500 9px var(--mono); white-space: nowrap; background: #24252d; color: #b4b5bd; }
 .risk-high-risk { color: #ff9ba5; background: #351f25; }
-.risk-needs-attention { color: #e5bd72; background: #302719; }
+.risk-inspect-signal { color: #e5bd72; background: #302719; }
 .review-card > p { color: #b9bbc4; font-size: 10px; }
 .evidence-list { list-style: none; margin: 10px 0; padding: 10px; background: #0e0f14; border-radius: 7px; display: grid; gap: 7px; }
 .evidence-list li { display: flex; gap: 7px; align-items: center; color: #8e919d; font: 400 9px var(--mono); }

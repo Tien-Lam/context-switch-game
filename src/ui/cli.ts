@@ -1,4 +1,5 @@
 import { content, modelById, providerById, ticketById, upgradeById } from "../content";
+import { BALANCE } from "../game/balance";
 import { availableModels, availableTickets, ticketProgressLabel } from "../game/selectors";
 import type { GameState, ReviewDecision } from "../game/types";
 
@@ -77,7 +78,7 @@ function providerHelp(state: GameState, context: CliContext) {
     "  /help                      show commands",
     "  /status                    session, model, permissions, and work",
     "  /model [ID]                list or switch this provider's model",
-    "  /usage                     quota and attention limits",
+    "  /usage                     provider quota and reset rates",
     "  /permissions [MODE]        ask | plan | accept-edits | workspace-write",
     "  /review [KEY]              inspect the review queue or a diff",
     "  /new                       start a fresh conversation",
@@ -207,17 +208,23 @@ function readReview(state: GameState, reference?: string) {
   const ticket = findTicket(reference);
   const review = ticket ? state.reviews.find((candidate) => candidate.ticketId === ticket.id) : undefined;
   if (!ticket || !review) return error("no pending review for that ticket");
+  const recommendation = review.risk < 0.2
+    ? "approve is supported by the evidence"
+    : review.risk < 0.42
+      ? "inspect the warning; revise if it violates the brief"
+      : "revise or escalate; the warning is unresolved";
   return {
     messages: [output([
-      `REVIEW ${ticket.key} · risk ${Math.round(review.risk * 100)}%`,
-      `summary     ${ticket.evidence.summary}`,
+      `REVIEW ${ticket.key} · estimated defect risk ${Math.round(review.risk * 100)}%`,
+      `change      ${ticket.evidence.summary}`,
       `tests       ${ticket.evidence.tests}`,
-      `signal      ${ticket.evidence.signal}`,
-      `files       ${ticket.files.join(", ")}`,
+      `warning     ${ticket.evidence.signal}`,
+      `scope       ${ticket.files.length} files · ${ticket.files.join(", ")}`,
+      `guidance    ${recommendation}`,
       "",
-      `actions     reviews approve ${ticket.key}`,
-      `            reviews revise ${ticket.key}`,
-      `            reviews escalate ${ticket.key}`,
+      `approve     reviews approve ${ticket.key}    ship now; accept the displayed risk`,
+      `revise      reviews revise ${ticket.key}     another agent pass; more time + quota`,
+      `escalate    reviews escalate ${ticket.key}   safe senior review; -${BALANCE.escalationTrustCost} trust`,
     ].join("\n"))],
   };
 }
@@ -227,8 +234,6 @@ function quota(state: GameState, context?: CliContext) {
   return [
     `${pad("PROVIDER", 20)} ${pad("REMAINING", 12)} RESET RATE`,
     ...providers.map((provider) => `${pad(provider.name, 20)} ${pad(Math.round(state.providerQuota[provider.id] ?? 0), 12)} ${(provider.regenPerSecond * 60).toFixed(1)}/min`),
-    "",
-    `attention           ${Math.round(state.attention)}%`,
   ].join("\n");
 }
 
@@ -323,7 +328,7 @@ export function evaluateCommand(raw: string, state: GameState, suppliedContext: 
   if (command === "cost") {
     const provider = providerById.get(context.providerId);
     const remaining = state.providerQuota[context.providerId] ?? 0;
-    return { messages: [output(`SESSION CONSUMPTION\n  provider      ${provider?.name}\n  remaining     ${Math.round(remaining)}\n  run total     ${Math.round(state.stats.quotaSpent)} simulated units\n  attention     ${Math.round(state.attention)}%`)] };
+    return { messages: [output(`SESSION CONSUMPTION\n  provider      ${provider?.name}\n  remaining     ${Math.round(remaining)}\n  run total     ${Math.round(state.stats.quotaSpent)} simulated units\n  plan first    ${BALANCE.improvedBriefQuotaCost} quota\n  compact       ${BALANCE.compactQuotaCost} quota`)] };
   }
   if (command === "context") {
     const session = activeProviderSession(state, context.providerId);
