@@ -1,18 +1,18 @@
 # Context Switch
 
-A local-first narrative idle-management game about supervising fictional coding agents under quota, context, review, and reliability pressure. The game is operated through a fictional developer terminal: read tickets, start agent sessions, inspect reviews, switch models, and buy structural upgrades with typed commands.
+A local-first narrative idle-management game about supervising fictional coding agents under quota, context, review, and reliability pressure. The game is operated through two fictional coding-agent CLIs: read tickets, start provider-bound sessions, inspect reviews, switch models, and buy structural upgrades with typed or natural-language commands.
 
 Everything in the game is simulated. It does not call an AI service, connect to developer accounts, or access a real repository.
 
 ## Terminal progression
 
-- Start with one shell and the core `tickets`, `agents`, `reviews`, `models`, `quota`, and `upgrades` tools.
-- Ship one ticket to unlock independent terminal tabs.
+- Start with full-window **Anthill Code** and **OpenMind Forge** sessions, each with its own prompt, models, slash commands, and quota pool.
+- Ship one ticket to unlock additional provider sessions.
 - Ship two tickets to unlock workspace naming.
-- Ship three tickets to unlock multiplexer-style monitoring panes.
-- Buy the `terminal-dashboard` upgrade to add the graphical live dashboard as an optional pane.
+- Ship three tickets to unlock full-window operations tabs.
+- Buy the `terminal-dashboard` upgrade to add the graphical live dashboard as a dedicated tab.
 
-Run `help` in the game for the complete command reference and `mux` to inspect terminal unlocks.
+Run `/help` in either provider session for its command reference and `mux` to inspect terminal unlocks.
 
 ## Development
 

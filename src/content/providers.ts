@@ -19,7 +19,7 @@ export const providers: ProviderDefinition[] = [
     color: "#72d7c3",
     maxQuota: 90,
     regenPerSecond: 0.03,
-    unlockAfter: 2,
+    unlockAfter: 0,
   },
 ];
 

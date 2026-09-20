@@ -13,7 +13,6 @@ import {
   GitPullRequest,
   HeartPulse,
   Layers3,
-  Columns2,
   Plus,
   Play,
   RefreshCcw,
@@ -29,7 +28,7 @@ import { content, modelById, providerById, ticketById } from "../content";
 import { availableModels, availableTickets, ticketProgressLabel } from "../game/selectors";
 import type { GameState, SessionState } from "../game/types";
 import { useGameStore } from "../app/store";
-import { evaluateCommand, type CliEffect, type CliMessage, type PaneMode } from "./cli";
+import { commandSuggestions, evaluateCommand, type CliEffect, type CliMessage, type PaneMode, type PermissionMode, type ReasoningMode } from "./cli";
 
 const percent = (value: number) => `${Math.round(value)}%`;
 const clock = (seconds: number) => {
@@ -312,38 +311,85 @@ interface TerminalLine {
 interface TerminalTabState {
   id: string;
   name: string;
+  kind: "provider" | "monitor";
+  providerId?: string;
+  modelId?: string;
+  permissionMode?: PermissionMode;
+  reasoning?: ReasoningMode;
+  view?: PaneMode;
   input: string;
   history: TerminalLine[];
   commands: string[];
   commandCursor: number;
-  pane: PaneMode | null;
 }
 
 let terminalLineId = 0;
 let terminalTabId = 1;
 const terminalLine = (kind: TerminalLineKind, text: string): TerminalLine => ({ id: terminalLineId += 1, kind, text });
 
-function createTerminalTab(name?: string): TerminalTabState {
+function providerBanner(providerId: string, modelId: string) {
+  const provider = providerById.get(providerId)!;
+  const model = modelById.get(modelId)!;
+  if (providerId === "openmind") {
+    return [
+      "╭──────────────────────────────────────────────────╮",
+      `│ >_ ${provider.name.padEnd(44)}│`,
+      `│ model:     ${(model.name + " " + model.tier).padEnd(37)}│`,
+      "│ directory: ~/delivery                            │",
+      "╰──────────────────────────────────────────────────╯",
+      "Describe a task, mention a ticket key, or run /help.",
+    ].join("\n");
+  }
+  return [
+    "╭──────────────────────────────────────────────────╮",
+    `│ ◆ ${provider.name.padEnd(46)}│`,
+    `│ ${model.name.padEnd(48)}│`,
+    "│ ~/delivery                                       │",
+    "╰──────────────────────────────────────────────────╯",
+    "Try “work on APP-101”, or run /help for commands.",
+  ].join("\n");
+}
+
+function defaultModel(providerId: string) {
+  return providerId === "openmind" ? "spark" : "ballad";
+}
+
+function createProviderTab(providerId: string, name?: string): TerminalTabState {
   const id = `term-${terminalTabId}`;
   terminalTabId += 1;
+  const modelId = defaultModel(providerId);
+  const provider = providerById.get(providerId)!;
   return {
     id,
-    name: name || `shell-${id.split("-")[1]}`,
+    name: name || provider.name,
+    kind: "provider",
+    providerId,
+    modelId,
+    permissionMode: providerId === "openmind" ? "workspace-write" : "ask",
+    reasoning: "medium",
     input: "",
     commands: [],
     commandCursor: 0,
-    pane: null,
     history: [
-      terminalLine("system", "CONTEXT SWITCH OPERATOR CONSOLE · build 0.2.0"),
-      terminalLine("muted", "One shell attached. Run `help` for available tools or `mux` to inspect terminal unlocks."),
+      terminalLine("system", providerBanner(providerId, modelId)),
     ],
   };
 }
 
+function createMonitorTab(view: PaneMode): TerminalTabState {
+  const id = `term-${terminalTabId}`;
+  terminalTabId += 1;
+  return { id, name: view === "dashboard" ? "dashboard.live" : `watch.${view}`, kind: "monitor", view, input: "", history: [], commands: [], commandCursor: 0 };
+}
+
+function defaultTerminalTabs() {
+  return [createProviderTab("anthill"), createProviderTab("openmind")];
+}
+
 function loadTerminalTabs() {
   try {
-    const parsed = JSON.parse(localStorage.getItem("context-switch-terminal-tabs") ?? "null") as TerminalTabState[] | null;
-    if (parsed?.length && parsed.every((tab) => tab.id && tab.name && Array.isArray(tab.history))) {
+    const parsed = JSON.parse(localStorage.getItem("context-switch-terminal-tabs-v2") ?? "null") as TerminalTabState[] | null;
+    if (parsed?.length && parsed.every((tab) => tab.id && tab.name && tab.kind && Array.isArray(tab.history))) {
       const highest = Math.max(...parsed.map((tab) => Number(tab.id.split("-")[1]) || 0));
       terminalTabId = highest + 1;
       terminalLineId = Math.max(terminalLineId, ...parsed.flatMap((tab) => tab.history.map((line) => line.id || 0)));
@@ -352,13 +398,13 @@ function loadTerminalTabs() {
   } catch {
     // A broken terminal layout should never block the game save.
   }
-  return [createTerminalTab()];
+  return defaultTerminalTabs();
 }
 
 function MonitorPane({ mode, game }: { mode: PaneMode; game: GameState }) {
   if (mode === "dashboard") {
     return (
-      <aside className="mux-monitor dashboard-monitor" aria-label="Live dashboard pane">
+      <aside className="mux-monitor dashboard-monitor full-window-tool" aria-label="Live dashboard">
         <div className="mux-pane-title"><span>dashboard.live</span><span>UPGRADE</span></div>
         <ResourceBar game={game} />
         <div className="dashboard-summary">
@@ -371,7 +417,7 @@ function MonitorPane({ mode, game }: { mode: PaneMode; game: GameState }) {
   }
 
   return (
-    <aside className="mux-monitor" aria-label={`${mode} monitoring pane`}>
+    <aside className="mux-monitor full-window-tool" aria-label={`${mode} monitor`}>
       <div className="mux-pane-title"><span>watch.{mode}</span><span>LIVE</span></div>
       {mode === "agents" && <div className="watch-list">{game.sessions.slice(0, game.unlockedSessions).map((session) => <div className="watch-row" key={session.id}><span>#{session.id + 1}</span><strong>{session.status}</strong><small>{session.ticketId ? `${ticketById.get(session.ticketId)?.key} · ${Math.round(session.progress * 100)}%` : "idle"}</small><Meter value={session.progress * 100} label={`Session ${session.id + 1}`} /></div>)}</div>}
       {mode === "reviews" && <div className="watch-list">{game.reviews.length ? game.reviews.map((review) => <div className="watch-row" key={review.id}><span>{ticketById.get(review.ticketId)?.key}</span><strong>{Math.round(review.risk * 100)}% risk</strong><small>session {review.sessionId + 1} · awaiting human</small></div>) : <p className="terminal-empty">review queue empty</p>}</div>}
@@ -389,7 +435,6 @@ export function App() {
   const reconcile = useGameStore((store) => store.reconcile);
   const persist = useGameStore((store) => store.persist);
   const speed = useGameStore((store) => store.speed);
-  const setSpeed = useGameStore((store) => store.setSpeed);
   const offlineSeconds = useGameStore((store) => store.offlineSeconds);
   const notice = useGameStore((store) => store.notice);
   const dismissNotice = useGameStore((store) => store.dismissNotice);
@@ -400,7 +445,7 @@ export function App() {
   const currentTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
   const activeAgents = useMemo(() => game.sessions.filter((session) => session.status === "working" || session.status === "quota-paused").length, [game.sessions]);
   const multiTabUnlocked = game.completedTicketIds.length >= 1;
-  const panesUnlocked = game.completedTicketIds.length >= 3;
+  const operationsUnlocked = game.completedTicketIds.length >= 3;
 
   const updateTab = (id: string, update: (tab: TerminalTabState) => TerminalTabState) => {
     setTabs((current) => current.map((tab) => tab.id === id ? update(tab) : tab));
@@ -408,12 +453,20 @@ export function App() {
   const appendLines = (id: string, lines: TerminalLine[]) => {
     updateTab(id, (tab) => ({ ...tab, history: [...tab.history, ...lines].slice(-240) }));
   };
-  const addTab = (name?: string) => {
+  const addTab = (providerId = currentTab.providerId ?? "anthill", name?: string) => {
     if (!multiTabUnlocked) {
-      appendLines(activeTabId, [terminalLine("error", "error: multiple tabs unlock after the first shipped ticket")]);
+      const target = currentTab.kind === "provider" ? activeTabId : tabs.find((tab) => tab.kind === "provider")?.id;
+      if (target) appendLines(target, [terminalLine("error", "error: extra provider sessions unlock after the first shipped ticket")]);
       return;
     }
-    const next = createTerminalTab(name);
+    const next = createProviderTab(providerId, name);
+    setTabs((current) => [...current, next].slice(-8));
+    setActiveTabId(next.id);
+  };
+  const openView = (view: PaneMode) => {
+    const existing = tabs.find((tab) => tab.kind === "monitor" && tab.view === view);
+    if (existing) { setActiveTabId(existing.id); return; }
+    const next = createMonitorTab(view);
     setTabs((current) => [...current, next].slice(-8));
     setActiveTabId(next.id);
   };
@@ -441,10 +494,14 @@ export function App() {
     if (effect.type === "purchase") failure = store.purchase(effect.upgradeId);
     if (effect.type === "speed") store.setSpeed(effect.speed);
     if (effect.type === "clear") updateTab(tabId, (tab) => ({ ...tab, history: [] }));
-    if (effect.type === "tab-new") addTab(effect.name);
+    if (effect.type === "new-session") updateTab(tabId, (tab) => tab.providerId && tab.modelId ? { ...tab, history: [terminalLine("system", providerBanner(tab.providerId, tab.modelId))], input: "", commands: [], commandCursor: 0 } : tab);
+    if (effect.type === "model") updateTab(tabId, (tab) => ({ ...tab, modelId: effect.modelId }));
+    if (effect.type === "permissions") updateTab(tabId, (tab) => ({ ...tab, permissionMode: effect.mode }));
+    if (effect.type === "reasoning") updateTab(tabId, (tab) => ({ ...tab, reasoning: effect.mode }));
+    if (effect.type === "tab-new") addTab(effect.providerId, effect.name);
     if (effect.type === "tab-close") closeTab(tabId);
     if (effect.type === "tab-rename") updateTab(tabId, (tab) => ({ ...tab, name: effect.name }));
-    if (effect.type === "pane") updateTab(tabId, (tab) => ({ ...tab, pane: effect.mode }));
+    if (effect.type === "open-view") openView(effect.mode);
     if (effect.type === "export") {
       const url = URL.createObjectURL(new Blob([store.exportSave()], { type: "application/json" }));
       const anchor = document.createElement("a");
@@ -455,9 +512,9 @@ export function App() {
     }
     if (effect.type === "restart") {
       await store.restart();
-      const first = createTerminalTab("shell-1");
-      setTabs([first]);
-      setActiveTabId(first.id);
+      const defaults = defaultTerminalTabs();
+      setTabs(defaults);
+      setActiveTabId(defaults[0].id);
     }
     if (failure) appendLines(tabId, [terminalLine("error", `error: ${failure}`)]);
     else if (["assign", "review", "compact", "purchase"].includes(effect.type)) appendLines(tabId, [terminalLine("success", "ok")]);
@@ -466,9 +523,11 @@ export function App() {
   const execute = async (raw: string, tabId = activeTabId) => {
     const command = raw.trim();
     if (!command) return;
+    const tab = tabs.find((candidate) => candidate.id === tabId);
+    if (!tab || tab.kind !== "provider" || !tab.providerId) return;
     updateTab(tabId, (tab) => ({ ...tab, input: "", commands: [...tab.commands, command].slice(-60), commandCursor: tab.commands.length + 1 }));
     appendLines(tabId, [terminalLine("command", command)]);
-    const result = evaluateCommand(command, useGameStore.getState().game);
+    const result = evaluateCommand(command, useGameStore.getState().game, { providerId: tab.providerId, modelId: tab.modelId, permissionMode: tab.permissionMode, reasoning: tab.reasoning });
     if (result.messages.length) appendLines(tabId, result.messages.map((message) => terminalLine(message.kind, message.text)));
     if (result.effect) await applyEffect(result.effect, tabId);
   };
@@ -482,14 +541,15 @@ export function App() {
     document.addEventListener("visibilitychange", onVisibility);
     return () => { window.clearInterval(interval); window.clearInterval(autosave); document.removeEventListener("visibilitychange", onVisibility); };
   }, [hydrate, hydrated, persist, pulse, reconcile]);
-  useEffect(() => { localStorage.setItem("context-switch-terminal-tabs", JSON.stringify(tabs)); }, [tabs]);
+  useEffect(() => { localStorage.setItem("context-switch-terminal-tabs-v2", JSON.stringify(tabs)); }, [tabs]);
   useEffect(() => {
     const event = game.events[0];
     if (!event) return;
     if (lastEventId.current === null) { lastEventId.current = event.id; return; }
     if (lastEventId.current !== event.id) {
       lastEventId.current = event.id;
-      appendLines(activeTabId, [terminalLine("event", `[${event.tone}] ${event.title}\n${event.message}`)]);
+      const target = currentTab.kind === "provider" ? activeTabId : tabs.find((tab) => tab.kind === "provider")?.id;
+      if (target) appendLines(target, [terminalLine("event", `[${event.tone}] ${event.title}\n${event.message}`)]);
     }
   }, [game.events[0]?.id]);
   useEffect(() => { outputRef.current?.scrollTo({ top: outputRef.current.scrollHeight, behavior: "smooth" }); }, [activeTabId, currentTab?.history.length]);
@@ -525,49 +585,57 @@ export function App() {
     }
   };
 
+  const currentProvider = currentTab.providerId ? providerById.get(currentTab.providerId) : undefined;
+  const currentModel = currentTab.modelId ? modelById.get(currentTab.modelId) : undefined;
+  const currentSession = currentTab.providerId ? game.sessions.find((session) => modelById.get(session.modelId ?? "")?.providerId === currentTab.providerId && session.status !== "idle") : undefined;
+  const contextRemaining = Math.round(currentSession?.context ?? 100);
+  const quotaRemaining = currentTab.providerId ? Math.round(game.providerQuota[currentTab.providerId] ?? 0) : 0;
+  const shellCommand = currentTab.kind === "monitor" ? `watch ${currentTab.view}` : currentTab.providerId === "openmind" ? "forge" : "anthill";
+
   return (
     <div className="terminal-desktop">
       <section className="terminal-window" aria-label="Context Switch operator terminal">
         <header className="terminal-titlebar">
           <div className="window-lights" aria-hidden="true"><span /><span /><span /></div>
-          <div className="terminal-window-title"><Terminal />operator@context-switch:~/delivery</div>
+          <div className="terminal-window-title"><Terminal />{currentProvider?.name ?? currentTab.name} · ~/delivery</div>
           <div className="terminal-window-meta"><span className="online-dot">LIVE</span><span>{clock(game.gameTime)}</span><span>{speed}×</span></div>
         </header>
 
         <nav className="terminal-tabs" aria-label="Terminal tabs" role="tablist">
           <div className="terminal-tabs-scroll">
             {tabs.map((tab, index) => (
-              <div className={`terminal-tab ${tab.id === activeTabId ? "active" : ""}`} key={tab.id}>
-                <button role="tab" aria-selected={tab.id === activeTabId} onClick={() => setActiveTabId(tab.id)}><span>{index + 1}</span>{tab.name}{tab.pane && <Columns2 />}</button>
-                {tabs.length > 1 && <button className="terminal-tab-close" aria-label={`Close ${tab.name}`} onClick={() => closeTab(tab.id)}><X /></button>}
+              <div className={`terminal-tab terminal-tab-${tab.providerId ?? tab.kind} ${tab.id === activeTabId ? "active" : ""}`} key={tab.id}>
+                <button role="tab" aria-selected={tab.id === activeTabId} onClick={() => setActiveTabId(tab.id)}><span>{index + 1}</span>{tab.providerId && <i className="tab-provider-dot" style={{ background: providerById.get(tab.providerId)?.color }} />}{tab.name}</button>
+                {(tabs.length > 2 || multiTabUnlocked) && <button className="terminal-tab-close" aria-label={`Close ${tab.name}`} onClick={() => closeTab(tab.id)}><X /></button>}
               </div>
             ))}
           </div>
-          <button className="terminal-tab-add" aria-label={multiTabUnlocked ? "New terminal tab" : "New tabs locked"} onClick={() => addTab()} title={multiTabUnlocked ? "New terminal · Alt+T" : "Ship one ticket to unlock tabs"}><Plus /></button>
+          <button className="terminal-tab-add" aria-label={multiTabUnlocked ? "New provider session" : "Extra sessions locked"} onClick={() => addTab()} title={multiTabUnlocked ? "New provider session · Alt+T" : "Ship one ticket to unlock extra sessions"}><Plus /></button>
         </nav>
 
         <div className="terminal-contextbar">
-          <span><b>$</b> context status --watch</span>
+          <span><b>$</b> {shellCommand}</span>
           <span>{activeAgents} agents</span><span>{game.reviews.length} reviews</span><span>{Math.round(game.attention)}% attention</span><span>{game.completedTicketIds.length}/{content.tickets.length} shipped</span>
         </div>
 
-        <div className={`terminal-workspace ${currentTab.pane ? "with-pane" : ""}`}>
-          <section className="terminal-shell" aria-label={`${currentTab.name} shell`}>
-            <div className="terminal-output" ref={outputRef} role="log" aria-live="polite">
-              {currentTab.history.map((line) => <div className={`terminal-line line-${line.kind}`} key={line.id}>{line.kind === "command" && <span className="line-prompt">operator@delivery $</span>}<pre>{line.text}</pre></div>)}
-              {currentTab.history.length <= 2 && <div className="command-launchers" aria-label="Suggested commands">{["help", "status", "tickets list", "tickets read APP-101"].map((command) => <button key={command} onClick={() => void execute(command)}>{command}</button>)}</div>}
-            </div>
-            <div className="terminal-prompt">
-              <span className="prompt-user">operator</span><span>@</span><span className="prompt-host">delivery</span><span>:</span><span className="prompt-path">~</span><span>$</span>
-              <input autoFocus aria-label="Terminal command" autoComplete="off" spellCheck={false} value={currentTab.input} onChange={(event) => updateTab(activeTabId, (tab) => ({ ...tab, input: event.target.value }))} onKeyDown={onInputKey} />
-            </div>
-          </section>
-          {currentTab.pane && <MonitorPane mode={currentTab.pane} game={game} />}
+        <div className={`terminal-workspace ${currentTab.kind === "monitor" ? "tool-view" : `provider-${currentTab.providerId}`}`}>
+          {currentTab.kind === "provider" ? (
+            <section className="terminal-shell" aria-label={`${currentProvider?.name} session`}>
+              <div className="terminal-output" ref={outputRef} role="log" aria-live="polite">
+                {currentTab.history.map((line) => <div className={`terminal-line line-${line.kind}`} key={line.id}>{line.kind === "command" && <span className="line-prompt">{currentTab.providerId === "openmind" ? "›" : ">"}</span>}<pre>{line.text}</pre></div>)}
+                {currentTab.history.length <= 1 && <div className="command-launchers" aria-label={`${currentProvider?.name} suggested commands`}>{commandSuggestions(currentTab.providerId ?? "anthill").map((command) => <button key={command} onClick={() => void execute(command)}>{command}</button>)}</div>}
+              </div>
+              <div className={`terminal-prompt prompt-${currentTab.providerId}`}>
+                <span className="provider-chevron">{currentTab.providerId === "openmind" ? "›" : ">"}</span>
+                <input autoFocus aria-label={`${currentProvider?.name} command`} placeholder={currentTab.providerId === "openmind" ? "Describe a task or /command" : "Message Anthill Code…"} autoComplete="off" spellCheck={false} value={currentTab.input} onChange={(event) => updateTab(activeTabId, (tab) => ({ ...tab, input: event.target.value }))} onKeyDown={onInputKey} />
+              </div>
+            </section>
+          ) : currentTab.view ? <MonitorPane mode={currentTab.view} game={game} /> : null}
         </div>
 
-        <footer className="mux-statusbar">
+        <footer className={`mux-statusbar status-${currentTab.providerId ?? currentTab.kind}`}>
           <div className="mux-session-list">{tabs.map((tab, index) => <button className={tab.id === activeTabId ? "active" : ""} onClick={() => setActiveTabId(tab.id)} key={tab.id}>{index + 1}:{tab.name}{tab.id === activeTabId ? "*" : ""}</button>)}</div>
-          <div><span>{panesUnlocked ? currentTab.pane ? `pane:${currentTab.pane}` : "pane:off" : `panes locked ${Math.max(0, 3 - game.completedTicketIds.length)} ship`}</span><span>ctrl-tab next</span><span>alt-1..8 select</span></div>
+          <div>{currentTab.kind === "provider" ? <><span>{currentModel?.name} {currentTab.providerId === "openmind" ? currentTab.reasoning : currentTab.permissionMode}</span><span>{quotaRemaining} quota</span><span>{contextRemaining}% context</span></> : <span>{operationsUnlocked ? `full-window:${currentTab.view}` : "operations locked"}</span>}<span>ctrl-tab next</span></div>
         </footer>
       </section>
 

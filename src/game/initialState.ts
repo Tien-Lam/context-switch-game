@@ -49,7 +49,7 @@ export function createInitialState(): GameState {
         at: 0,
         tone: "info",
         title: "09:03 · Monday",
-        message: "Your manager has enabled Anthill Code. The banner ticket is apparently a perfect first task.",
+        message: "Anthill Code and OpenMind Forge are installed. You have two CLIs, two quota pools, and one orchestration slot.",
       },
     ],
     ending: null,

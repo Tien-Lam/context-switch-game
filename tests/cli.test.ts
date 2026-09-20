@@ -20,6 +20,25 @@ describe("operator CLI", () => {
     });
   });
 
+  it("keeps models bound to their provider CLI", () => {
+    const state = createInitialState();
+    const forge = { providerId: "openmind", modelId: "spark", permissionMode: "workspace-write" as const, reasoning: "medium" as const };
+    expect(evaluateCommand("/model spark", state, forge).effect).toEqual({ type: "model", modelId: "spark" });
+    expect(evaluateCommand("/model ballad", state, forge).messages[0].kind).toBe("error");
+  });
+
+  it("accepts natural-language work prompts in each provider session", () => {
+    const state = createInitialState();
+    const result = evaluateCommand("please implement APP-101", state, { providerId: "openmind", modelId: "spark" });
+    expect(result.effect).toEqual({
+      type: "assign",
+      sessionId: 0,
+      ticketId: "deployment-banner",
+      modelId: "spark",
+      improveBrief: false,
+    });
+  });
+
   it("unlocks multiplexer abilities through progression", () => {
     const initial = evaluateCommand("tab new", createInitialState());
     expect(initial.messages[0].kind).toBe("error");
@@ -27,7 +46,7 @@ describe("operator CLI", () => {
     const progressed = createInitialState();
     progressed.completedTicketIds = ["deployment-banner", "telemetry-toggle", "cache-summary"];
     expect(evaluateCommand("tab new ops", progressed).effect?.type).toBe("tab-new");
-    expect(evaluateCommand("pane split agents", progressed).effect).toEqual({ type: "pane", mode: "agents" });
+    expect(evaluateCommand("watch agents", progressed).effect).toEqual({ type: "open-view", mode: "agents" });
   });
 
   it("keeps the graphical dashboard behind its upgrade", () => {
@@ -35,6 +54,6 @@ describe("operator CLI", () => {
     state.completedTicketIds = ["deployment-banner", "telemetry-toggle", "cache-summary"];
     expect(evaluateCommand("dashboard", state).messages[0].kind).toBe("error");
     state.purchasedUpgradeIds.push("terminal-dashboard");
-    expect(evaluateCommand("dashboard", state).effect).toEqual({ type: "pane", mode: "dashboard" });
+    expect(evaluateCommand("dashboard", state).effect).toEqual({ type: "open-view", mode: "dashboard" });
   });
 });

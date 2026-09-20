@@ -85,8 +85,8 @@ function unlockProgression(state: GameState) {
   if (complete === 2) {
     addEvent(state, {
       tone: "info",
-      title: "OpenMind Forge trial enabled",
-      message: "A second provider arrives with a separate quota pool and absolutely no overlapping terminology.",
+      title: "Parallel operator seat enabled",
+      message: "Both provider terminals can now run work at the same time. Their quota pools remain separate.",
     });
   }
 }

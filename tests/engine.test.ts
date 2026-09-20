@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { advanceGame, reviewTicket, startTicket } from "../src/game/engine";
 import { createInitialState } from "../src/game/initialState";
+import { availableModels } from "../src/game/selectors";
 
 describe("agent simulation", () => {
   it("moves completed work into a separate review queue", () => {
@@ -13,8 +14,9 @@ describe("agent simulation", () => {
     expect(completed.completedTicketIds).not.toContain("deployment-banner");
   });
 
-  it("unlocks concurrency and the second provider after two shipped tickets", () => {
+  it("starts with both providers and unlocks parallel execution after two shipped tickets", () => {
     let state = createInitialState();
+    expect(availableModels(state).map((model) => model.id)).toEqual(expect.arrayContaining(["ballad", "spark"]));
     state = startTicket(state, 0, "deployment-banner", "ballad");
     state = advanceGame(state, 800);
     state = reviewTicket(state, state.reviews[0].id, "escalate");
@@ -24,7 +26,7 @@ describe("agent simulation", () => {
 
     expect(state.unlockedSessions).toBe(2);
     expect(state.completedTicketIds).toEqual(expect.arrayContaining(["deployment-banner", "telemetry-toggle"]));
-    expect(state.events.some((event) => event.title.includes("OpenMind"))).toBe(true);
+    expect(state.events.some((event) => event.title.includes("Parallel operator"))).toBe(true);
   });
 
   it("turns a rushed cache review into a later traceable incident", () => {
