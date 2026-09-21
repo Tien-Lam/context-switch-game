@@ -1,5 +1,5 @@
 import { content, modelById, providerById, ticketById } from "../content";
-import type { GameState } from "./types";
+import type { GameState, ReviewState } from "./types";
 
 export function completedCount(state: GameState) {
   return state.completedTicketIds.length;
@@ -32,6 +32,13 @@ export function availableTickets(state: GameState) {
     && !inReview.has(ticket.id)
     && ticket.prerequisites.every((prerequisite) => complete.has(prerequisite)),
   );
+}
+
+export function isReviewBlocked(state: GameState, review: ReviewState) {
+  const ticket = ticketById.get(review.ticketId);
+  const session = state.sessions[review.sessionId];
+  if (!ticket || !session || ticket.riskFlag === "none" || session.reviewRound > 0) return false;
+  return !(session.briefImproved && Boolean(ticket.evidence.resolution) && review.risk < 0.2);
 }
 
 export function ticketProgressLabel(state: GameState, ticketId: string) {

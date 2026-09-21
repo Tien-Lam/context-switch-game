@@ -1,12 +1,13 @@
 import { produce } from "immer";
 import { content, modelById, providerById, ticketById, upgradeById } from "../content";
 import { BALANCE } from "./balance";
-import { availableTickets, isModelUnlocked } from "./selectors";
+import { availableTickets, isModelUnlocked, isReviewBlocked } from "./selectors";
 import type { EndingState, GameEvent, GameState, ReviewDecision, SessionState } from "./types";
 
 export class GameRuleError extends Error {}
 
 const clamp = (value: number, minimum: number, maximum: number) => Math.max(minimum, Math.min(maximum, value));
+const SIMULATION_EPSILON = 1e-9;
 
 function hasUpgrade(state: GameState, id: string) {
   return state.purchasedUpgradeIds.includes(id);
@@ -34,16 +35,16 @@ function resetSession(session: SessionState) {
   session.progress = 0;
   session.briefImproved = false;
   session.reviewRound = 0;
-  session.context = clamp(session.context + 12, 0, 100);
+  session.workedInParallel = false;
+  session.context = clamp(session.context + 2, 0, 100);
 }
 
 function calculateReviewRisk(state: GameState, session: SessionState) {
   const ticket = ticketById.get(session.ticketId ?? "");
   const model = modelById.get(session.modelId ?? "");
   if (!ticket || !model) return 0.5;
-  const concurrent = state.sessions.filter((candidate) => candidate.status === "working").length;
-  const contextPenalty = Math.max(0, 70 - session.context) / 180;
-  const parallelPenalty = concurrent > 1 && !hasUpgrade(state, "worktree-isolation") ? 0.09 : 0;
+  const contextPenalty = Math.max(0, 80 - session.context) / 200;
+  const parallelPenalty = session.workedInParallel && !hasUpgrade(state, "worktree-isolation") ? 0.09 : 0;
   const briefingBonus = session.briefImproved ? 0.13 : 0;
   const playbookBonus = hasUpgrade(state, "repo-playbook") ? 0.07 : 0;
   const testBonus = hasUpgrade(state, "fast-checks") ? 0.08 : 0;
@@ -60,14 +61,23 @@ function calculateReviewRisk(state: GameState, session: SessionState) {
 
 function computeEnding(state: GameState): EndingState {
   const reliability = clamp(Math.round(state.repoHealth - state.stats.defects * 7), 0, 100);
-  const throughput = clamp(Math.round(55 + state.stats.shipped * 6 - state.stats.revisions * 2), 0, 100);
-  const trust = clamp(Math.round(state.trust + state.peakTrust / 3), 0, 100);
+  const activeTimePenalty = Math.max(0, (state.stats.activeSeconds - 75) / 5);
+  const throughput = clamp(Math.round(50 + state.stats.shipped * 6 - state.stats.revisions * 4 - state.stats.escalations * 5 - activeTimePenalty), 0, 100);
+  const trust = clamp(Math.round(state.trust), 0, 100);
   const debt = clamp(Math.round(state.debt), 0, 100);
-  const disciplined = reliability >= 72 && debt <= 28;
-  const title = disciplined ? "The demo works. Suspiciously well." : "The demo works, provided nobody refreshes twice.";
-  const message = state.flags.cacheShortcut
-    ? "You moved fast, found the stale-data trail, and learned that every shortcut eventually joins the review queue."
-    : "You used the evidence in front of you to make parallel agents feel like leverage instead of weather.";
+  const disciplined = reliability >= 78 && debt <= 20 && state.stats.defects <= 1;
+  const title = disciplined
+    ? "The demo works. Suspiciously well."
+    : state.stats.defects >= 3
+      ? "The demo works. Legal has follow-up questions."
+      : "The demo works, provided nobody refreshes twice.";
+  const consequences = [
+    state.flags.cacheShortcut ? "the dashboard cache served stale customer data" : "the cache audit stayed clean",
+    state.flags.privacyDefaultedOn ? "telemetry shipped with the wrong default" : "the privacy default held",
+    state.flags.runtimeDriftAccepted ? "the legacy runtime shim survived the audit" : "the runtime started cleanly",
+    state.flags.raceAccepted ? "the report race reached production" : "parallel exports remained isolated",
+  ];
+  const message = `Your review history followed you into the room: ${consequences.join(", ")}.`;
   return { title, message, scores: { throughput, reliability, trust, debt } };
 }
 
@@ -79,7 +89,9 @@ function unlockProgression(state: GameState) {
     addEvent(state, {
       tone: "good",
       title: `Session ${state.unlockedSessions} unlocked`,
-      message: "Your throughput ceiling increased. Quota, context, and review quality now matter more.",
+      message: state.unlockedSessions === 3
+        ? "Three ready workstreams can now run together. Try `watch agents` or buy Workspace Isolation before they share a branch."
+        : "Your throughput ceiling increased. Quota, context, and review quality now matter more.",
     });
   }
   if (complete === BALANCE.secondSessionAfter) {
@@ -92,12 +104,22 @@ function unlockProgression(state: GameState) {
 }
 
 function announceIncidentIfReady(state: GameState) {
-  if (state.flags.incidentAnnounced || !state.flags.cacheShortcut) return;
+  if (state.flags.incidentAnnounced) return;
   const prerequisitesDone = ["parallel-reports", "quota-display"].every((id) => state.completedTicketIds.includes(id));
   if (!prerequisitesDone) return;
   state.flags.incidentAnnounced = true;
+  if (!state.flags.cacheShortcut) {
+    state.trust = clamp(state.trust + 2, 0, 100);
+    state.peakTrust = Math.max(state.peakTrust, state.trust);
+    addEvent(state, {
+      tone: "good",
+      title: "Pre-demo freshness audit passed",
+      message: "Support tried to reproduce stale customer summaries and failed. The PERF-204 review prevented an incident. +2 trust.",
+    });
+    return;
+  }
   const mitigated = hasUpgrade(state, "observability");
-  state.trust = clamp(state.trust - (mitigated ? 3 : 8), 0, 100);
+  state.trust = clamp(state.trust - (mitigated ? 5 : 15), 0, 100);
   state.repoHealth = clamp(state.repoHealth - (mitigated ? 3 : 8), 0, 100);
   addEvent(state, {
     tone: "bad",
@@ -108,12 +130,49 @@ function announceIncidentIfReady(state: GameState) {
   });
 }
 
-function completeTicket(state: GameState, session: SessionState, defect: boolean) {
+function hasEvent(state: GameState, title: string) {
+  return state.events.some((event) => event.title === title);
+}
+
+function announceConsequences(state: GameState) {
+  if (state.flags.privacyDefaultedOn && state.completedTicketIds.includes("quota-display") && !hasEvent(state, "Enterprise disabled telemetry")) {
+    state.trust = clamp(state.trust - 12, 0, 100);
+    state.debt = clamp(state.debt + 4, 0, 100);
+    addEvent(state, {
+      tone: "warning",
+      title: "Enterprise disabled telemetry",
+      message: "The implicit opt-in from APP-118 reached a customer workspace. Support opened a migration task. −12 trust, +4 debt.",
+    });
+  }
+  if (state.flags.runtimeDriftAccepted && state.completedTicketIds.includes("parallel-reports") && !hasEvent(state, "Audit found the legacy worker")) {
+    state.trust = clamp(state.trust - 8, 0, 100);
+    state.repoHealth = clamp(state.repoHealth - 5, 0, 100);
+    state.debt = clamp(state.debt + 5, 0, 100);
+    addEvent(state, {
+      tone: "warning",
+      title: "Audit found the legacy worker",
+      message: "The compatibility shim from PLAT-77 kept one report worker on the unsupported runtime. −8 trust, −5 health, +5 debt.",
+    });
+  }
+  if (state.flags.raceAccepted && state.completedTicketIds.includes("stale-customer-data") && !hasEvent(state, "Two reports became one")) {
+    state.trust = clamp(state.trust - 12, 0, 100);
+    state.repoHealth = clamp(state.repoHealth - 4, 0, 100);
+    addEvent(state, {
+      tone: "bad",
+      title: "Two reports became one",
+      message: "The shared export path from DATA-312 overwrote a customer's report during the demo rehearsal. −12 trust, −4 health.",
+    });
+  }
+}
+
+function completeTicket(state: GameState, session: SessionState, defect: boolean, rewardTrust = true) {
   const ticket = ticketById.get(session.ticketId ?? "");
+  const providerId = modelById.get(session.modelId ?? "")?.providerId;
   if (!ticket) throw new GameRuleError("Ticket no longer exists.");
   if (!state.completedTicketIds.includes(ticket.id)) state.completedTicketIds.push(ticket.id);
   state.stats.shipped += 1;
-  state.trust = clamp(state.trust + ticket.rewardTrust - (defect ? 6 : 0), 0, 100);
+  const earnedTrust = rewardTrust ? ticket.rewardTrust : 0;
+  state.trust = clamp(state.trust + earnedTrust - (defect ? 6 : 0), 0, 100);
   state.peakTrust = Math.max(state.peakTrust, state.trust);
   state.repoHealth = clamp(state.repoHealth + (defect ? -7 : 2.5), 0, 100);
   state.debt = clamp(state.debt + (defect ? 9 : -1.5), 0, 100);
@@ -122,18 +181,23 @@ function completeTicket(state: GameState, session: SessionState, defect: boolean
     state.stats.defects += 1;
     if (ticket.riskFlag === "cache-shortcut") state.flags.cacheShortcut = true;
     if (ticket.riskFlag === "privacy-default") state.flags.privacyDefaultedOn = true;
+    if (ticket.riskFlag === "runtime-drift") state.flags.runtimeDriftAccepted = true;
     if (ticket.riskFlag === "merge-race") state.flags.raceAccepted = true;
   }
 
   addEvent(state, {
+    providerId,
     tone: defect ? "warning" : "good",
     title: `${ticket.key} shipped`,
     message: defect
       ? "The patch is live, but the review left a visible risk unresolved. Future work may inherit it."
-      : `Clean delivery. +${ticket.rewardTrust} trust and a slightly healthier repository.`,
+      : rewardTrust
+        ? `Clean delivery. +${ticket.rewardTrust} trust and a slightly healthier repository.`
+        : "Senior review secured the delivery, but the interruption earned no delivery trust.",
   });
   resetSession(session);
   unlockProgression(state);
+  announceConsequences(state);
   announceIncidentIfReady(state);
   if (ticket.kind === "finale") state.ending = computeEnding(state);
 }
@@ -167,11 +231,13 @@ export function startTicket(
     target.progress = 0;
     target.reviewRound = 0;
     target.briefImproved = improveBrief;
+    target.workedInParallel = false;
     if (improveBrief) {
       state.providerQuota[model.providerId] -= BALANCE.improvedBriefQuotaCost;
       state.stats.quotaSpent += BALANCE.improvedBriefQuotaCost;
     }
     addEvent(state, {
+      providerId: model.providerId,
       tone: "info",
       title: `${ticket.key} → ${model.name}`,
       message: `${improveBrief ? `The agent spent ${BALANCE.improvedBriefQuotaCost} quota clarifying acceptance criteria before coding.` : "The session started with the ticket exactly as written."} Estimated review in ${Math.max(1, Math.ceil(ticket.duration / model.speed))}s.`,
@@ -180,43 +246,132 @@ export function startTicket(
 }
 
 export function advanceGame(source: GameState, elapsedSeconds: number) {
-  const seconds = Math.max(0, elapsedSeconds);
+  const seconds = Number.isFinite(elapsedSeconds) ? Math.max(0, elapsedSeconds) : 0;
   if (seconds === 0 || source.ending) return source;
 
   return produce(source, (state) => {
-    state.gameTime += seconds;
-    for (const provider of content.providers) {
-      state.providerQuota[provider.id] = clamp(
-        (state.providerQuota[provider.id] ?? 0) + seconds * provider.regenPerSecond,
-        0,
-        quotaMax(state, provider.id),
-      );
-    }
+    let remainingSeconds = seconds;
 
-    for (const session of state.sessions.slice(0, state.unlockedSessions)) {
-      if (session.status !== "working" && session.status !== "quota-paused") continue;
-      const ticket = ticketById.get(session.ticketId ?? "");
-      const model = modelById.get(session.modelId ?? "");
-      if (!ticket || !model) continue;
-      const quota = state.providerQuota[model.providerId] ?? 0;
-      const workNeededSeconds = ((1 - session.progress) * ticket.duration) / model.speed;
-      const possibleWorkSeconds = Math.min(seconds, quota / model.quotaRate, workNeededSeconds);
-      if (possibleWorkSeconds <= 0.01) {
-        if (session.status !== "quota-paused") {
-          session.status = "quota-paused";
-          addEvent(state, { tone: "warning", title: `${model.name} hit its limit`, message: "Switch provider terminals now or improve the quota plan; waiting is never the intended move." });
+    while (remainingSeconds > 0) {
+      const active = state.sessions.slice(0, state.unlockedSessions).flatMap((session) => {
+        if (session.status !== "working" && session.status !== "quota-paused") return [];
+        const ticket = ticketById.get(session.ticketId ?? "");
+        const model = modelById.get(session.modelId ?? "");
+        if (!ticket || !model) return [];
+        return [{ session, ticket, model }];
+      });
+
+      const alreadyComplete = active.filter(({ session, ticket, model }) =>
+        ((1 - session.progress) * ticket.duration) / model.speed <= SIMULATION_EPSILON,
+      );
+      if (alreadyComplete.length) {
+        for (const { session, ticket, model } of alreadyComplete) {
+          session.progress = 1;
+          session.status = "awaiting-review";
+          state.reviews.push({
+            id: `${ticket.id}-${session.reviewRound}-${Math.round(state.gameTime)}`,
+            ticketId: ticket.id,
+            sessionId: session.id,
+            risk: calculateReviewRisk(state, session),
+            createdAt: state.gameTime,
+          });
+          addEvent(state, {
+            providerId: model.providerId,
+            tone: "info",
+            title: `${ticket.key} is ready for review`,
+            message: `${model.name} is ${Math.round(session.context)}% context-coherent and ${Math.round((1 - state.reviews.at(-1)!.risk) * 100)}% confident.`,
+          });
         }
         continue;
       }
-      session.status = "working";
-      const spent = possibleWorkSeconds * model.quotaRate;
-      state.providerQuota[model.providerId] = Math.max(0, quota - spent);
-      state.stats.quotaSpent += spent;
-      session.progress = clamp(session.progress + (possibleWorkSeconds * model.speed) / ticket.duration, 0, 1);
-      const decayMultiplier = hasUpgrade(state, "context-notes") ? 0.55 : 1;
-      session.context = clamp(session.context - possibleWorkSeconds * model.contextDecay * BALANCE.contextDecayPerWorkSecond * decayMultiplier, 0, 100);
 
-      if (session.progress >= 1) {
+      const providerWork = new Map<string, typeof active>();
+      for (const work of active) {
+        const group = providerWork.get(work.model.providerId) ?? [];
+        group.push(work);
+        providerWork.set(work.model.providerId, group);
+      }
+
+      const workFraction = new Map<string, number>();
+      let stepSeconds = remainingSeconds;
+      for (const provider of content.providers) {
+        const group = providerWork.get(provider.id) ?? [];
+        const demand = group.reduce((total, { model }) => total + model.quotaRate, 0);
+        let quota = clamp(state.providerQuota[provider.id] ?? 0, 0, quotaMax(state, provider.id));
+        if (quota <= SIMULATION_EPSILON && demand > provider.regenPerSecond) quota = 0;
+        state.providerQuota[provider.id] = quota;
+
+        const fraction = demand === 0 || demand <= provider.regenPerSecond || quota > 0
+          ? 1
+          : provider.regenPerSecond / demand;
+        workFraction.set(provider.id, fraction);
+
+        if (demand > provider.regenPerSecond && quota > 0) {
+          stepSeconds = Math.min(stepSeconds, quota / (demand - provider.regenPerSecond));
+        }
+        if (fraction > 0) {
+          for (const { session, ticket, model } of group) {
+            const workNeeded = ((1 - session.progress) * ticket.duration) / model.speed;
+            stepSeconds = Math.min(stepSeconds, workNeeded / fraction);
+          }
+        }
+      }
+
+      if (stepSeconds <= SIMULATION_EPSILON) {
+        // A quota boundary can land within floating-point noise of the current time.
+        // Snap depleted pools to zero, then recalculate their constrained work rate.
+        for (const provider of content.providers) {
+          const group = providerWork.get(provider.id) ?? [];
+          const demand = group.reduce((total, { model }) => total + model.quotaRate, 0);
+          if (demand > provider.regenPerSecond && (state.providerQuota[provider.id] ?? 0) <= SIMULATION_EPSILON) {
+            state.providerQuota[provider.id] = 0;
+          }
+        }
+        stepSeconds = Math.min(remainingSeconds, SIMULATION_EPSILON);
+      }
+
+      const workingNow = active.filter(({ model }) => (workFraction.get(model.providerId) ?? 0) > 0);
+      if (workingNow.length > 1) {
+        for (const { session } of workingNow) session.workedInParallel = true;
+      }
+
+      for (const provider of content.providers) {
+        const group = providerWork.get(provider.id) ?? [];
+        const fraction = workFraction.get(provider.id) ?? 1;
+        const demand = group.reduce((total, { model }) => total + model.quotaRate, 0);
+        const spent = demand * fraction * stepSeconds;
+        state.providerQuota[provider.id] = clamp(
+          (state.providerQuota[provider.id] ?? 0) + provider.regenPerSecond * stepSeconds - spent,
+          0,
+          quotaMax(state, provider.id),
+        );
+        state.stats.quotaSpent += spent;
+
+        for (const { session, ticket, model } of group) {
+          const constrained = fraction < 1 - SIMULATION_EPSILON;
+          if (constrained && session.status !== "quota-paused") {
+            addEvent(state, {
+              providerId: model.providerId,
+              tone: "warning",
+              title: `${model.name} hit its limit`,
+              message: "Work is continuing at the provider's regeneration rate. Reduce contention or improve the quota plan.",
+            });
+          }
+          session.status = constrained ? "quota-paused" : "working";
+          const workSeconds = stepSeconds * fraction;
+          session.progress = clamp(session.progress + (workSeconds * model.speed) / ticket.duration, 0, 1);
+          const decayMultiplier = hasUpgrade(state, "context-notes") ? 0.55 : 1;
+          session.context = clamp(session.context - workSeconds * model.contextDecay * BALANCE.contextDecayPerWorkSecond * decayMultiplier, 0, 100);
+        }
+      }
+
+      state.gameTime += stepSeconds;
+      if (active.length > 0) state.stats.activeSeconds += stepSeconds;
+      remainingSeconds = Math.max(0, remainingSeconds - stepSeconds);
+
+      const completed = active.filter(({ session }) => session.progress >= 1 - SIMULATION_EPSILON);
+      for (const { session, ticket, model } of completed) {
+        session.progress = 1;
         session.status = "awaiting-review";
         state.reviews.push({
           id: `${ticket.id}-${session.reviewRound}-${Math.round(state.gameTime)}`,
@@ -226,18 +381,23 @@ export function advanceGame(source: GameState, elapsedSeconds: number) {
           createdAt: state.gameTime,
         });
         addEvent(state, {
+          providerId: model.providerId,
           tone: "info",
           title: `${ticket.key} is ready for review`,
           message: `${model.name} is ${Math.round(session.context)}% context-coherent and ${Math.round((1 - state.reviews.at(-1)!.risk) * 100)}% confident.`,
         });
       }
     }
+
   });
 }
 
 export function reviewTicket(source: GameState, reviewId: string, decision: ReviewDecision) {
   const review = source.reviews.find((candidate) => candidate.id === reviewId);
   if (!review) throw new GameRuleError("That review is no longer available.");
+  if (decision === "escalate" && source.trust < BALANCE.escalationTrustCost) {
+    throw new GameRuleError(`Escalation requires ${BALANCE.escalationTrustCost} trust.`);
+  }
 
   return produce(source, (state) => {
     const index = state.reviews.findIndex((candidate) => candidate.id === reviewId);
@@ -252,7 +412,7 @@ export function reviewTicket(source: GameState, reviewId: string, decision: Revi
       session.progress = 0.62;
       session.reviewRound += 1;
       session.context = clamp(session.context + 6, 0, 100);
-      addEvent(state, { tone: "info", title: `${ticket.key} changes requested`, message: "The agent is addressing the visible risk with a narrower second pass." });
+      addEvent(state, { providerId: modelById.get(session.modelId ?? "")?.providerId, tone: "info", title: `${ticket.key} changes requested`, message: "The agent is addressing the visible risk with a narrower second pass." });
       return;
     }
 
@@ -260,12 +420,12 @@ export function reviewTicket(source: GameState, reviewId: string, decision: Revi
       state.stats.escalations += 1;
       state.trust = clamp(state.trust - BALANCE.escalationTrustCost, 0, 100);
       state.debt = clamp(state.debt - 2, 0, 100);
-      addEvent(state, { tone: "good", title: `${ticket.key} escalated`, message: `A senior review corrected the risky path before shipping. The interruption cost ${BALANCE.escalationTrustCost} trust.` });
-      completeTicket(state, session, false);
+      addEvent(state, { providerId: modelById.get(session.modelId ?? "")?.providerId, tone: "good", title: `${ticket.key} escalated`, message: `A senior review corrected the risky path before shipping. The interruption cost ${BALANCE.escalationTrustCost} trust.` });
+      completeTicket(state, session, false, false);
       return;
     }
 
-    const defect = current.risk >= 0.29 && ticket.riskFlag !== "none";
+    const defect = isReviewBlocked(state, current);
     completeTicket(state, session, defect);
   });
 }
@@ -282,7 +442,7 @@ export function compactSession(source: GameState, sessionId: number) {
     state.stats.quotaSpent += BALANCE.compactQuotaCost;
     target.context = 88;
     target.progress = Math.max(0, target.progress - 0.08);
-    addEvent(state, { tone: "info", title: `Session ${sessionId + 1} compacted`, message: `The summary used ${BALANCE.compactQuotaCost} provider quota, recovered context, and lost a little implementation momentum.` });
+    addEvent(state, { providerId: model.providerId, tone: "info", title: `Session ${sessionId + 1} compacted`, message: `The summary used ${BALANCE.compactQuotaCost} provider quota, recovered context, and lost a little implementation momentum.` });
   });
 }
 

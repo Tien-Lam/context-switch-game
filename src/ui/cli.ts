@@ -1,6 +1,6 @@
 import { content, modelById, providerById, ticketById, upgradeById } from "../content";
 import { BALANCE } from "../game/balance";
-import { availableModels, availableTickets, ticketProgressLabel } from "../game/selectors";
+import { availableModels, availableTickets, isReviewBlocked, ticketProgressLabel } from "../game/selectors";
 import type { GameState, ReviewDecision } from "../game/types";
 
 export type PaneMode = "agents" | "reviews" | "quota" | "events" | "dashboard";
@@ -30,6 +30,7 @@ export type CliEffect =
   | { type: "tab-rename"; name: string }
   | { type: "open-view"; mode: PaneMode }
   | { type: "export" }
+  | { type: "import" }
   | { type: "restart" };
 
 export interface CliMessage {
@@ -71,6 +72,20 @@ function activeProviderSession(state: GameState, providerId: string) {
   });
 }
 
+function visibleProviderSession(state: GameState, providerId: string) {
+  return state.sessions.find((session) => {
+    const provider = modelById.get(session.modelId ?? "")?.providerId;
+    return provider === providerId && session.status !== "idle";
+  });
+}
+
+function eventClock(seconds: number) {
+  const totalMinutes = Math.floor(seconds / 60);
+  const hours = Math.floor(totalMinutes / 60) + 9;
+  const minutes = totalMinutes % 60;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
 function providerHelp(state: GameState, context: CliContext) {
   const isAnthill = context.providerId === "anthill";
   const dashboard = state.purchasedUpgradeIds.includes("terminal-dashboard");
@@ -108,14 +123,14 @@ function providerHelp(state: GameState, context: CliContext) {
     state.completedTicketIds.length >= 1 ? "  tab new [PROVIDER] [NAME]   attach another provider session" : "  [locked] extra sessions · ship 1 ticket",
     state.completedTicketIds.length >= 3 ? "  watch <TYPE>                open a full-window operations tab" : "  [locked] operations views · ship 3 tickets",
     dashboard ? "  dashboard                  open the full-window live dashboard" : "  [upgrade] dashboard · buy terminal-dashboard",
-    "  mux | save export | restart --confirm | clear",
+    "  mux | save export|import | restart --confirm | clear",
   ].join("\n");
 }
 
 function status(state: GameState, context: CliContext) {
   const provider = providerById.get(context.providerId);
   const model = modelById.get(context.modelId ?? "");
-  const active = activeProviderSession(state, context.providerId);
+  const active = visibleProviderSession(state, context.providerId);
   const ticket = active?.ticketId ? ticketById.get(active.ticketId) : undefined;
   if (context.providerId === "openmind") {
     return [
@@ -126,7 +141,10 @@ function status(state: GameState, context: CliContext) {
       `  permissions        ${context.permissionMode ?? "workspace-write"}`,
       `  quota              ${Math.round(state.providerQuota[context.providerId] ?? 0)}/${provider?.maxQuota ?? 0}`,
       `  task               ${ticket ? `${ticket.key} · ${Math.round((active?.progress ?? 0) * 100)}%` : "idle"}`,
+      `  task state         ${active?.status ?? "idle"}`,
       `  review queue       ${state.reviews.length}`,
+      `  trust / health     ${Math.round(state.trust)} / ${Math.round(state.repoHealth)}`,
+      `  repository debt    ${Math.round(state.debt)}`,
     ].join("\n");
   }
   return [
@@ -137,6 +155,9 @@ function status(state: GameState, context: CliContext) {
     `  plan usage         ${Math.round(state.providerQuota[context.providerId] ?? 0)}/${provider?.maxQuota ?? 0} remaining`,
     `  context            ${active ? `${Math.round(active.context)}% left` : "fresh"}`,
     `  current task       ${ticket ? `${ticket.key} · ${Math.round((active?.progress ?? 0) * 100)}%` : "none"}`,
+    `  task state         ${active?.status ?? "idle"}`,
+    `  trust / health     ${Math.round(state.trust)} / ${Math.round(state.repoHealth)}`,
+    `  repository debt    ${Math.round(state.debt)}`,
   ].join("\n");
 }
 
@@ -177,8 +198,12 @@ function listModels(state: GameState, context: CliContext) {
   const provider = providerById.get(context.providerId);
   return [
     `${provider?.name ?? "Provider"} models`,
-    `${pad("MODEL", 14)} ${pad("TIER", 10)} STATE`,
-    ...content.models.filter((model) => model.providerId === context.providerId).map((model) => `${pad(model.id, 14)} ${pad(model.tier, 10)} ${model.id === context.modelId ? "active" : unlocked.has(model.id) ? "available" : `locked @ trust ${model.unlockTrust}`}`),
+    `${pad("MODEL", 14)} ${pad("TIER", 10)} ${pad("SPEED", 8)} ${pad("QUOTA/S", 9)} ${pad("RISK", 8)} STATE`,
+    ...content.models.filter((model) => model.providerId === context.providerId).map((model) => {
+      const risk = `${model.riskModifier >= 0 ? "+" : ""}${Math.round(model.riskModifier * 100)}%`;
+      const stateLabel = model.id === context.modelId ? "active" : unlocked.has(model.id) ? "available" : `locked @ trust ${model.unlockTrust}`;
+      return `${pad(model.id, 14)} ${pad(model.tier, 10)} ${pad(`${model.speed.toFixed(2)}x`, 8)} ${pad(model.quotaRate.toFixed(1), 9)} ${pad(risk, 8)} ${stateLabel}\n  ${model.description}`;
+    }),
   ].join("\n");
 }
 
@@ -196,10 +221,11 @@ function listAgents(state: GameState) {
 function listReviews(state: GameState) {
   if (!state.reviews.length) return "review queue empty";
   return [
-    `${pad("KEY", 10)} ${pad("RISK", 10)} ${pad("SESSION", 10)} TITLE`,
+    `${pad("KEY", 10)} ${pad("GATE", 12)} ${pad("SCORE", 8)} ${pad("SESSION", 10)} TITLE`,
     ...state.reviews.map((review) => {
       const ticket = ticketById.get(review.ticketId)!;
-      return `${pad(ticket.key, 10)} ${pad(`${Math.round(review.risk * 100)}%`, 10)} ${pad(review.sessionId + 1, 10)} ${ticket.title}`;
+      const blocked = isReviewBlocked(state, review);
+      return `${pad(ticket.key, 10)} ${pad(blocked ? "blocked" : "passed", 12)} ${pad(Math.round(review.risk * 100), 8)} ${pad(review.sessionId + 1, 10)} ${ticket.title}`;
     }),
   ].join("\n");
 }
@@ -208,23 +234,35 @@ function readReview(state: GameState, reference?: string) {
   const ticket = findTicket(reference);
   const review = ticket ? state.reviews.find((candidate) => candidate.ticketId === ticket.id) : undefined;
   if (!ticket || !review) return error("no pending review for that ticket");
-  const recommendation = review.risk < 0.2
-    ? "approve is supported by the evidence"
-    : review.risk < 0.42
-      ? "inspect the warning; revise if it violates the brief"
-      : "revise or escalate; the warning is unresolved";
+  const session = state.sessions[review.sessionId];
+  const unresolvedFinding = isReviewBlocked(state, review);
+  const resolution = ticket.riskFlag !== "none" && !unresolvedFinding ? ticket.evidence.resolution : undefined;
+  const warning = resolution?.signal ?? ticket.evidence.signal;
+  const tests = resolution?.tests ?? ticket.evidence.tests;
+  const recommendation = unresolvedFinding
+    ? "BLOCKED: approve will ship the warning as a known defect"
+    : "PASS: approve is supported by the current evidence";
+  const history = ticket.kind === "finale"
+    ? [
+        `history     privacy ${state.flags.privacyDefaultedOn ? "exposed" : "clean"} · cache ${state.flags.cacheShortcut ? "stale" : "clean"}`,
+        `            runtime ${state.flags.runtimeDriftAccepted ? "drifted" : "clean"} · exports ${state.flags.raceAccepted ? "racy" : "isolated"}`,
+        `            health ${Math.round(state.repoHealth)} · debt ${Math.round(state.debt)} · trust ${Math.round(state.trust)}`,
+      ]
+    : [];
   return {
     messages: [output([
-      `REVIEW ${ticket.key} · estimated defect risk ${Math.round(review.risk * 100)}%`,
-      `change      ${ticket.evidence.summary}`,
-      `tests       ${ticket.evidence.tests}`,
-      `warning     ${ticket.evidence.signal}`,
+      `REVIEW ${ticket.key} · review risk score ${Math.round(review.risk * 100)}/100`,
+      `gate        ${unresolvedFinding ? "unresolved finding" : "passed"}`,
+      `change      ${session.reviewRound > 0 ? `Revised: ${ticket.evidence.summary}` : ticket.evidence.summary}`,
+      `tests       ${tests}`,
+      `warning     ${warning}`,
+      ...history,
       `scope       ${ticket.files.length} files · ${ticket.files.join(", ")}`,
       `guidance    ${recommendation}`,
       "",
-      `approve     reviews approve ${ticket.key}    ship now; accept the displayed risk`,
-      `revise      reviews revise ${ticket.key}     another agent pass; more time + quota`,
-      `escalate    reviews escalate ${ticket.key}   safe senior review; -${BALANCE.escalationTrustCost} trust`,
+      `approve     reviews approve ${ticket.key}    ship now; ${unresolvedFinding ? "known defect escapes" : "gate passed"}`,
+      `revise      reviews revise ${ticket.key}     resolve finding; another agent pass`,
+      `escalate    reviews escalate ${ticket.key}   ${state.trust >= BALANCE.escalationTrustCost ? `safe senior review; -${BALANCE.escalationTrustCost} trust and no delivery reward` : `unavailable; requires ${BALANCE.escalationTrustCost} trust`}`,
     ].join("\n"))],
   };
 }
@@ -243,7 +281,7 @@ function upgrades(state: GameState) {
     ...content.upgrades.map((upgrade) => {
       const bought = state.purchasedUpgradeIds.includes(upgrade.id);
       const unlocked = state.completedTicketIds.length >= upgrade.unlockAfter;
-      return `${pad(upgrade.id, 24)} ${pad(upgrade.cost, 8)} ${pad(bought ? "active" : unlocked ? "ready" : `ship ${upgrade.unlockAfter}`, 12)} ${upgrade.name}`;
+      return `${pad(upgrade.id, 24)} ${pad(upgrade.cost, 8)} ${pad(bought ? "active" : unlocked ? "ready" : `ship ${upgrade.unlockAfter}`, 12)} ${upgrade.name}\n  ${upgrade.description}`;
     }),
   ].join("\n");
 }
@@ -296,8 +334,7 @@ function naturalLanguagePrompt(raw: string, state: GameState, context: CliContex
     return { messages: [output(`${provider?.name ?? "Agent"}: describe the work with a ticket key, for example “work on APP-101”.`, "muted")] };
   }
   if (/\b(review|inspect|diff)\b/i.test(raw)) {
-    const result = readReview(state, reference);
-    if (!result.messages[0]?.text.startsWith("error:")) return result;
+    return readReview(state, reference);
   }
   return runTicket(state, context, reference, [], raw);
 }
@@ -331,9 +368,14 @@ export function evaluateCommand(raw: string, state: GameState, suppliedContext: 
     return { messages: [output(`SESSION CONSUMPTION\n  provider      ${provider?.name}\n  remaining     ${Math.round(remaining)}\n  run total     ${Math.round(state.stats.quotaSpent)} simulated units\n  plan first    ${BALANCE.improvedBriefQuotaCost} quota\n  compact       ${BALANCE.compactQuotaCost} quota`)] };
   }
   if (command === "context") {
-    const session = activeProviderSession(state, context.providerId);
+    const session = visibleProviderSession(state, context.providerId);
     const used = 100 - (session?.context ?? 100);
-    return { messages: [output(`CONTEXT WINDOW\n  system + tools    ${Math.round(used * 0.35)}%\n  conversation      ${Math.round(used * 0.65)}%\n  free              ${Math.round(session?.context ?? 100)}%\n\n${session ? "Run /compact to summarize and recover context." : "Fresh session. No task context loaded."}`)] };
+    const guidance = session?.status === "awaiting-review"
+      ? "Context is retained while the change awaits review."
+      : session
+        ? "Run /compact to summarize and recover context."
+        : "Fresh session. No task context loaded.";
+    return { messages: [output(`CONTEXT WINDOW\n  system + tools    ${Math.round(used * 0.35)}%\n  conversation      ${Math.round(used * 0.65)}%\n  free              ${Math.round(session?.context ?? 100)}%\n\n${guidance}`)] };
   }
   if (command === "permissions") {
     if (!subcommand) return { messages: [output(`permission mode: ${context.permissionMode}\nchoices: ask, plan, accept-edits, workspace-write`)] };
@@ -408,7 +450,7 @@ export function evaluateCommand(raw: string, state: GameState, suppliedContext: 
 
   if (command === "events") {
     const count = Math.max(1, Math.min(30, Number(tokens[1]) || 10));
-    return { messages: [output(state.events.slice(0, count).map((event) => `${String(Math.floor(event.at / 60) + 9).padStart(2, "0")}:${String(Math.floor(event.at) % 60).padStart(2, "0")}  ${pad(event.tone, 8)} ${event.title}\n       ${event.message}`).join("\n"))] };
+    return { messages: [output(state.events.slice(0, count).map((event) => `${eventClock(event.at)}  ${pad(event.tone, 8)} ${event.title}\n       ${event.message}`).join("\n"))] };
   }
 
   if (command === "speed") {
@@ -450,6 +492,7 @@ export function evaluateCommand(raw: string, state: GameState, suppliedContext: 
   }
 
   if (command === "save" && subcommand === "export") return { messages: [output("exporting versioned local save…", "muted")], effect: { type: "export" } };
+  if (command === "save" && subcommand === "import") return { messages: [output("choose a Context Switch save to import…", "muted")], effect: { type: "import" } };
   if (command === "restart") {
     if (!tokens.includes("--confirm")) return error("restart is destructive; run `restart --confirm`");
     return { messages: [output("starting a clean shift…", "muted")], effect: { type: "restart" } };
@@ -459,8 +502,19 @@ export function evaluateCommand(raw: string, state: GameState, suppliedContext: 
   return error(`command not found: /${command}; run \`/help\``);
 }
 
-export function commandSuggestions(providerId: string) {
-  return providerId === "openmind"
-    ? ["/help", "/status", "/model", "/reasoning high", "implement APP-101"]
-    : ["/help", "/status", "/model", "/context", "work on APP-101"];
+export function commandSuggestions(providerId: string, state?: GameState) {
+  if (!state) {
+    return providerId === "openmind"
+      ? ["/help", "/status", "/model", "/reasoning high", "implement APP-101"]
+      : ["/help", "/status", "/model", "/context", "work on APP-101"];
+  }
+
+  const review = state.reviews[0];
+  const reviewTicket = review ? ticketById.get(review.ticketId) : undefined;
+  const session = visibleProviderSession(state, providerId);
+  const nextTicket = availableTickets(state)[0];
+  if (reviewTicket) return ["/status", `reviews read ${reviewTicket.key}`, `reviews approve ${reviewTicket.key}`, `reviews revise ${reviewTicket.key}`, "events 5"];
+  if (session) return ["/status", "/context", ...(session.status === "awaiting-review" ? ["reviews list"] : ["/compact"]), "events 5", "/usage"];
+  if (nextTicket) return ["/status", "tickets list", `tickets read ${nextTicket.key}`, `${providerId === "openmind" ? "implement" : "work on"} ${nextTicket.key}`, "/model"];
+  return ["/status", "tickets list", "upgrades list", "events 5", "mux"];
 }

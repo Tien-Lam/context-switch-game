@@ -7,8 +7,8 @@ export const providers: ProviderDefinition[] = [
     shortName: "ANT",
     description: "Careful plans, literary model names, and a mysteriously emotional quota meter.",
     color: "#d49b78",
-    maxQuota: 100,
-    regenPerSecond: 1.4,
+    maxQuota: 60,
+    regenPerSecond: 0.8,
     unlockAfter: 0,
   },
   {
@@ -17,8 +17,8 @@ export const providers: ProviderDefinition[] = [
     shortName: "OMF",
     description: "Isolated workspaces, adjustable confidence, and an enthusiasm for doing all of it at once.",
     color: "#72d7c3",
-    maxQuota: 90,
-    regenPerSecond: 1.6,
+    maxQuota: 55,
+    regenPerSecond: 0.9,
     unlockAfter: 0,
   },
 ];
@@ -58,7 +58,7 @@ export const models: ModelDefinition[] = [
     quotaRate: 3.4,
     riskModifier: -0.19,
     contextDecay: 0.025,
-    unlockTrust: 50,
+    unlockTrust: 44,
   },
   {
     id: "spark",
@@ -82,7 +82,7 @@ export const models: ModelDefinition[] = [
     quotaRate: 2.8,
     riskModifier: -0.05,
     contextDecay: 0.04,
-    unlockTrust: 42,
+    unlockTrust: 36,
   },
   {
     id: "foundry",
@@ -94,6 +94,6 @@ export const models: ModelDefinition[] = [
     quotaRate: 3.6,
     riskModifier: -0.21,
     contextDecay: 0.027,
-    unlockTrust: 62,
+    unlockTrust: 54,
   },
 ];

@@ -11,6 +11,7 @@ function createSession(id: number): SessionState {
     context: 100,
     briefImproved: false,
     reviewRound: 0,
+    workedInParallel: false,
   };
 }
 
@@ -31,6 +32,7 @@ export function createInitialState(): GameState {
     flags: {
       cacheShortcut: false,
       privacyDefaultedOn: false,
+      runtimeDriftAccepted: false,
       raceAccepted: false,
       incidentAnnounced: false,
     },
@@ -40,6 +42,7 @@ export function createInitialState(): GameState {
       escalations: 0,
       defects: 0,
       quotaSpent: 0,
+      activeSeconds: 0,
     },
     events: [
       {

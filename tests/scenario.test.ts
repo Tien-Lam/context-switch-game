@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { availableModels, availableTickets } from "../src/game/selectors";
 import { advanceGame, reviewTicket, startTicket } from "../src/game/engine";
 import { createInitialState } from "../src/game/initialState";
+import { content } from "../src/content";
 
 describe("vertical slice", () => {
   it("can reach the authored ending without a deadlock", () => {
@@ -17,17 +18,20 @@ describe("vertical slice", () => {
         const model = [...models]
           .filter((candidate) => candidate.tier === ticket.recommendedTier)
           .sort((a, b) => (state.providerQuota[b.providerId] ?? 0) - (state.providerQuota[a.providerId] ?? 0))[0] ?? models[0];
-        state = startTicket(state, session.id, ticket.id, model.id, ticket.baseRisk >= 0.35);
+        const canPlan = (state.providerQuota[model.providerId] ?? 0) >= 7;
+        state = startTicket(state, session.id, ticket.id, model.id, ticket.baseRisk >= 0.35 && canPlan);
       }
       state = advanceGame(state, 20);
       for (const review of [...state.reviews]) {
-        state = reviewTicket(state, review.id, "escalate");
+        const ticket = content.tickets.find((candidate) => candidate.id === review.ticketId)!;
+        const session = state.sessions[review.sessionId];
+        state = reviewTicket(state, review.id, ticket.riskFlag !== "none" && session.reviewRound === 0 ? "revise" : "approve");
       }
     }
 
-    expect(state.completedTicketIds).toHaveLength(8);
+    expect(state.completedTicketIds).toHaveLength(content.tickets.length);
     expect(state.ending).not.toBeNull();
     expect(state.ending?.scores.reliability).toBeGreaterThan(60);
-    expect(state.gameTime).toBeLessThanOrEqual(160);
+    expect(state.gameTime).toBeLessThanOrEqual(220);
   });
 });

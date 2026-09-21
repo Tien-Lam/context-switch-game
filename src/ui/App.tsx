@@ -25,7 +25,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { content, modelById, providerById, ticketById } from "../content";
 import { BALANCE } from "../game/balance";
-import { availableModels, availableTickets, ticketProgressLabel } from "../game/selectors";
+import { availableModels, availableTickets, isReviewBlocked, ticketProgressLabel } from "../game/selectors";
 import type { GameState, SessionState } from "../game/types";
 import { useGameStore } from "../app/store";
 import { commandSuggestions, evaluateCommand, type CliEffect, type CliMessage, type PaneMode, type PermissionMode, type ReasoningMode } from "./cli";
@@ -61,10 +61,10 @@ function StatCard({ icon, label, value, detail, tone = "purple" }: { icon: React
 }
 
 function ResourceBar({ game }: { game: GameState }) {
-  const riskyReviews = game.reviews.filter((review) => review.risk >= 0.29).length;
+  const blockedReviews = game.reviews.filter((review) => isReviewBlocked(game, review)).length;
   return (
     <section className="resource-grid" aria-label="Run resources">
-      <StatCard icon={<GitPullRequest />} label="Review queue" value={game.reviews.length.toString()} detail={`${riskyReviews} above risk gate`} />
+      <StatCard icon={<GitPullRequest />} label="Review queue" value={game.reviews.length.toString()} detail={`${blockedReviews} blocked findings`} />
       <StatCard icon={<ShieldCheck />} label="Trust" value={Math.round(game.trust).toString()} detail={`Peak ${Math.round(game.peakTrust)}`} tone="green" />
       <StatCard icon={<HeartPulse />} label="Repo health" value={percent(game.repoHealth)} detail={`${Math.round(game.debt)} debt`} tone="cyan" />
       {content.providers.map((provider) => {
@@ -198,16 +198,19 @@ function ReviewQueue({ game }: { game: GameState }) {
         <div className="review-list">
           {game.reviews.map((item) => {
             const ticket = ticketById.get(item.ticketId)!;
-            const riskLabel = item.risk < 0.2 ? "Low risk" : item.risk < 0.42 ? "Inspect signal" : "High risk";
+            const session = game.sessions[item.sessionId];
+            const unresolvedFinding = isReviewBlocked(game, item);
+            const riskLabel = unresolvedFinding ? "Blocked" : "Gate passed";
+            const resolution = ticket.riskFlag !== "none" && !unresolvedFinding ? ticket.evidence.resolution : undefined;
             return (
               <article className="review-card" key={item.id}>
-                <div className="review-top"><div><span className="eyebrow">{ticket.key}</span><h3>{ticket.title}</h3></div><span className={`risk risk-${riskLabel.toLowerCase().replaceAll(" ", "-")}`}>{riskLabel} · {Math.round(item.risk * 100)}%</span></div>
-                <p>{ticket.evidence.summary}</p>
-                <ul className="evidence-list"><li><Check />{ticket.evidence.tests}</li><li><AlertTriangle />{ticket.evidence.signal}</li><li><FileCode2 />{ticket.files.join(" · ")}</li></ul>
+                <div className="review-top"><div><span className="eyebrow">{ticket.key}</span><h3>{ticket.title}</h3></div><span className={`risk ${unresolvedFinding ? "risk-high-risk" : "risk-low-risk"}`}>{riskLabel} · {Math.round(item.risk * 100)}/100</span></div>
+                <p>{session.reviewRound > 0 ? `Revised: ${ticket.evidence.summary}` : ticket.evidence.summary}</p>
+                <ul className="evidence-list"><li><Check />{resolution?.tests ?? ticket.evidence.tests}</li><li><AlertTriangle />{resolution?.signal ?? ticket.evidence.signal}</li><li><FileCode2 />{ticket.files.join(" · ")}</li></ul>
                 <div className="review-actions">
-                  <button onClick={() => review(item.id, "approve")}><Check />Approve <span>ship now</span></button>
-                  <button onClick={() => review(item.id, "revise")}><RefreshCcw />Revise <span>agent pass</span></button>
-                  <button onClick={() => review(item.id, "escalate")}><Sparkles />Escalate <span>−{BALANCE.escalationTrustCost} trust</span></button>
+                  <button onClick={() => review(item.id, "approve")}><Check />Approve <span>{unresolvedFinding ? "known defect" : "ship now"}</span></button>
+                  <button onClick={() => review(item.id, "revise")}><RefreshCcw />Revise <span>resolve finding</span></button>
+                  <button disabled={game.trust < BALANCE.escalationTrustCost} onClick={() => review(item.id, "escalate")}><Sparkles />Escalate <span>{game.trust >= BALANCE.escalationTrustCost ? `−${BALANCE.escalationTrustCost} trust · no reward` : `need ${BALANCE.escalationTrustCost} trust`}</span></button>
                 </div>
               </article>
             );
@@ -282,9 +285,8 @@ function SaveControls() {
   );
 }
 
-function Ending() {
+function Ending({ onRestart }: { onRestart: () => void }) {
   const ending = useGameStore((store) => store.game.ending);
-  const restart = useGameStore((store) => store.restart);
   if (!ending) return null;
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="ending-title">
@@ -295,7 +297,7 @@ function Ending() {
         <div className="score-grid">
           {Object.entries(ending.scores).map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong><Meter value={label === "debt" ? 100 - value : value} label={label} /></div>)}
         </div>
-        <button className="primary-button" onClick={() => void restart()}><RefreshCcw />Start another shift</button>
+        <button className="primary-button" onClick={onRestart}><RefreshCcw />Start another shift</button>
       </section>
     </div>
   );
@@ -338,6 +340,7 @@ function providerBanner(providerId: string, modelId: string) {
       `│ model:     ${(model.name + " " + model.tier).padEnd(37)}│`,
       "│ directory: ~/delivery                            │",
       "╰──────────────────────────────────────────────────╯",
+      provider.description,
       "Describe a task, mention a ticket key, or run /help.",
     ].join("\n");
   }
@@ -347,6 +350,7 @@ function providerBanner(providerId: string, modelId: string) {
     `│ ${model.name.padEnd(48)}│`,
     "│ ~/delivery                                       │",
     "╰──────────────────────────────────────────────────╯",
+    provider.description,
     "Try “work on APP-101”, or run /help for commands.",
   ].join("\n");
 }
@@ -421,7 +425,7 @@ function MonitorPane({ mode, game }: { mode: PaneMode; game: GameState }) {
     <aside className="mux-monitor full-window-tool" aria-label={`${mode} monitor`}>
       <div className="mux-pane-title"><span>watch.{mode}</span><span>LIVE</span></div>
       {mode === "agents" && <div className="watch-list">{game.sessions.slice(0, game.unlockedSessions).map((session) => <div className="watch-row" key={session.id}><span>#{session.id + 1}</span><strong>{session.status}</strong><small>{session.ticketId ? `${ticketById.get(session.ticketId)?.key} · ${Math.round(session.progress * 100)}%` : "idle"}</small><Meter value={session.progress * 100} label={`Session ${session.id + 1}`} /></div>)}</div>}
-      {mode === "reviews" && <div className="watch-list">{game.reviews.length ? game.reviews.map((review) => <div className="watch-row" key={review.id}><span>{ticketById.get(review.ticketId)?.key}</span><strong>{Math.round(review.risk * 100)}% risk</strong><small>session {review.sessionId + 1} · awaiting human</small></div>) : <p className="terminal-empty">review queue empty</p>}</div>}
+      {mode === "reviews" && <div className="watch-list">{game.reviews.length ? game.reviews.map((review) => { const ticket = ticketById.get(review.ticketId); const blocked = isReviewBlocked(game, review); return <div className="watch-row" key={review.id}><span>{ticket?.key}</span><strong>{blocked ? "blocked finding" : "gate passed"}</strong><small>session {review.sessionId + 1} · score {Math.round(review.risk * 100)}/100</small></div>; }) : <p className="terminal-empty">review queue empty</p>}</div>}
       {mode === "quota" && <div className="watch-list">{content.providers.map((provider) => <div className="watch-row" key={provider.id}><span>{provider.shortName}</span><strong>{Math.round(game.providerQuota[provider.id] ?? 0)} remaining</strong><Meter value={game.providerQuota[provider.id] ?? 0} max={provider.maxQuota} color={provider.color} label={provider.name} /></div>)}</div>}
       {mode === "events" && <div className="watch-events">{game.events.slice(0, 12).map((event) => <article key={event.id} className={`watch-event event-${event.tone}`}><time>{clock(event.at)}</time><div><strong>{event.title}</strong><p>{event.message}</p></div></article>)}</div>}
     </aside>
@@ -439,12 +443,14 @@ export function App() {
   const offlineSeconds = useGameStore((store) => store.offlineSeconds);
   const notice = useGameStore((store) => store.notice);
   const dismissNotice = useGameStore((store) => store.dismissNotice);
+  const importSave = useGameStore((store) => store.importSave);
   const [tabs, setTabs] = useState<TerminalTabState[]>(loadTerminalTabs);
   const [activeTabId, setActiveTabId] = useState(() => tabs[0].id);
   const outputRef = useRef<HTMLDivElement>(null);
+  const importInputRef = useRef<HTMLInputElement>(null);
   const lastEventId = useRef<string | null>(null);
   const currentTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
-  const activeAgents = useMemo(() => game.sessions.filter((session) => session.status === "working" || session.status === "quota-paused").length, [game.sessions]);
+  const occupiedSessions = useMemo(() => game.sessions.filter((session) => session.status !== "idle").length, [game.sessions]);
   const multiTabUnlocked = game.completedTicketIds.length >= 1;
   const operationsUnlocked = game.completedTicketIds.length >= 3;
 
@@ -485,6 +491,28 @@ export function App() {
     const index = tabs.findIndex((tab) => tab.id === activeTabId);
     setActiveTabId(tabs[(index + direction + tabs.length) % tabs.length].id);
   };
+  const selectAndFocusTab = (index: number) => {
+    const next = tabs[(index + tabs.length) % tabs.length];
+    if (!next) return;
+    setActiveTabId(next.id);
+    window.requestAnimationFrame(() => document.getElementById(`terminal-tab-${next.id}`)?.focus());
+  };
+  const onTerminalTabKey = (event: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
+    if (event.key === "ArrowRight") { event.preventDefault(); selectAndFocusTab(index + 1); }
+    if (event.key === "ArrowLeft") { event.preventDefault(); selectAndFocusTab(index - 1); }
+    if (event.key === "Home") { event.preventDefault(); selectAndFocusTab(0); }
+    if (event.key === "End") { event.preventDefault(); selectAndFocusTab(tabs.length - 1); }
+  };
+  const restartRun = async () => {
+    await useGameStore.getState().restart();
+    const defaults = defaultTerminalTabs();
+    setTabs(defaults);
+    setActiveTabId(defaults[0].id);
+  };
+  const onImport = async (file?: File) => {
+    if (file) await importSave(await file.text());
+    if (importInputRef.current) importInputRef.current.value = "";
+  };
 
   const applyEffect = async (effect: CliEffect, tabId: string) => {
     const store = useGameStore.getState();
@@ -511,12 +539,8 @@ export function App() {
       anchor.click();
       URL.revokeObjectURL(url);
     }
-    if (effect.type === "restart") {
-      await store.restart();
-      const defaults = defaultTerminalTabs();
-      setTabs(defaults);
-      setActiveTabId(defaults[0].id);
-    }
+    if (effect.type === "import") importInputRef.current?.click();
+    if (effect.type === "restart") await restartRun();
     if (failure) appendLines(tabId, [terminalLine("error", `error: ${failure}`)]);
     else if (["assign", "review", "compact", "purchase"].includes(effect.type)) appendLines(tabId, [terminalLine("success", "ok")]);
   };
@@ -551,8 +575,13 @@ export function App() {
     const previousIndex = game.events.findIndex((event) => event.id === lastEventId.current);
     const fresh = game.events.slice(0, previousIndex >= 0 ? previousIndex : 1).reverse();
     lastEventId.current = newest.id;
-    const target = currentTab.kind === "provider" ? activeTabId : tabs.find((tab) => tab.kind === "provider")?.id;
-    if (target) appendLines(target, fresh.map((event) => terminalLine("event", `[${event.tone}] ${event.title}\n${event.message}`)));
+    for (const event of fresh) {
+      const providerTarget = event.providerId
+        ? tabs.find((tab) => tab.kind === "provider" && tab.providerId === event.providerId)?.id
+        : undefined;
+      const target = providerTarget ?? (currentTab.kind === "provider" ? activeTabId : tabs.find((tab) => tab.kind === "provider")?.id);
+      if (target) appendLines(target, [terminalLine("event", `[${event.tone}] ${event.title}\n${event.message}`)]);
+    }
   }, [game.events]);
   useEffect(() => { outputRef.current?.scrollTo({ top: outputRef.current.scrollHeight, behavior: "smooth" }); }, [activeTabId, currentTab?.history.length]);
   useEffect(() => {
@@ -606,8 +635,8 @@ export function App() {
         <nav className="terminal-tabs" aria-label="Terminal tabs" role="tablist">
           <div className="terminal-tabs-scroll">
             {tabs.map((tab, index) => (
-              <div className={`terminal-tab terminal-tab-${tab.providerId ?? tab.kind} ${tab.id === activeTabId ? "active" : ""}`} key={tab.id}>
-                <button role="tab" aria-selected={tab.id === activeTabId} onClick={() => setActiveTabId(tab.id)}><span>{index + 1}</span>{tab.providerId && <i className="tab-provider-dot" style={{ background: providerById.get(tab.providerId)?.color }} />}{tab.name}</button>
+              <div role="presentation" className={`terminal-tab terminal-tab-${tab.providerId ?? tab.kind} ${tab.id === activeTabId ? "active" : ""}`} key={tab.id}>
+                <button id={`terminal-tab-${tab.id}`} role="tab" aria-selected={tab.id === activeTabId} aria-controls="terminal-panel" tabIndex={tab.id === activeTabId ? 0 : -1} onClick={() => setActiveTabId(tab.id)} onKeyDown={(event) => onTerminalTabKey(event, index)}><span>{index + 1}</span>{tab.providerId && <i className="tab-provider-dot" style={{ background: providerById.get(tab.providerId)?.color }} />}{tab.name}</button>
                 {(tabs.length > 2 || multiTabUnlocked) && <button className="terminal-tab-close" aria-label={`Close ${tab.name}`} onClick={() => closeTab(tab.id)}><X /></button>}
               </div>
             ))}
@@ -617,15 +646,15 @@ export function App() {
 
         <div className="terminal-contextbar">
           <span><b>$</b> {shellCommand}</span>
-          <span>{activeAgents}/{game.unlockedSessions} slots</span><span>{game.reviews.length} reviews</span><span>{Math.round(game.debt)} debt</span><span>{game.completedTicketIds.length}/{content.tickets.length} shipped</span>
+          <span>{occupiedSessions}/{game.unlockedSessions} slots</span><span>{game.reviews.length} reviews</span><span>{Math.round(game.debt)} debt</span><span>{game.completedTicketIds.length}/{content.tickets.length} shipped</span>
         </div>
 
-        <div className={`terminal-workspace ${currentTab.kind === "monitor" ? "tool-view" : `provider-${currentTab.providerId}`}`}>
+        <div id="terminal-panel" role="tabpanel" aria-labelledby={`terminal-tab-${currentTab.id}`} className={`terminal-workspace ${currentTab.kind === "monitor" ? "tool-view" : `provider-${currentTab.providerId}`}`}>
           {currentTab.kind === "provider" ? (
             <section className="terminal-shell" aria-label={`${currentProvider?.name} session`}>
               <div className="terminal-output" ref={outputRef} role="log" aria-live="polite">
                 {currentTab.history.map((line) => <div className={`terminal-line line-${line.kind}`} key={line.id}>{line.kind === "command" && <span className="line-prompt">{currentTab.providerId === "openmind" ? "›" : ">"}</span>}<pre>{line.text}</pre></div>)}
-                {currentTab.history.length <= 1 && <div className="command-launchers" aria-label={`${currentProvider?.name} suggested commands`}>{commandSuggestions(currentTab.providerId ?? "anthill").map((command) => <button key={command} onClick={() => void execute(command)}>{command}</button>)}</div>}
+                <div className="command-launchers" aria-label={`${currentProvider?.name} suggested commands`}>{commandSuggestions(currentTab.providerId ?? "anthill", game).map((command) => <button key={command} onClick={() => void execute(command)}>{command}</button>)}</div>
               </div>
               <div className={`terminal-prompt prompt-${currentTab.providerId}`}>
                 <span className="provider-chevron">{currentTab.providerId === "openmind" ? "›" : ">"}</span>
@@ -637,12 +666,13 @@ export function App() {
 
         <footer className={`mux-statusbar status-${currentTab.providerId ?? currentTab.kind}`}>
           <div className="mux-session-list">{tabs.map((tab, index) => <button className={tab.id === activeTabId ? "active" : ""} onClick={() => setActiveTabId(tab.id)} key={tab.id}>{index + 1}:{tab.name}{tab.id === activeTabId ? "*" : ""}</button>)}</div>
-          <div>{currentTab.kind === "provider" ? <><span>{currentModel?.name} {currentTab.providerId === "openmind" ? currentTab.reasoning : currentTab.permissionMode}</span><span>{quotaRemaining} quota</span><span>{contextRemaining}% context</span></> : <span>{operationsUnlocked ? `full-window:${currentTab.view}` : "operations locked"}</span>}<span>ctrl-tab next</span></div>
+          <div>{currentTab.kind === "provider" ? <><span>{currentSession?.ticketId ? `${ticketById.get(currentSession.ticketId)?.key} ${currentSession.status}` : "idle"} · {currentModel?.name} {currentTab.providerId === "openmind" ? currentTab.reasoning : currentTab.permissionMode}</span><span>{quotaRemaining} quota</span><span>{contextRemaining}% context</span></> : <span>{operationsUnlocked ? `full-window:${currentTab.view}` : "operations locked"}</span>}<span>ctrl-tab next</span></div>
         </footer>
       </section>
 
       {(notice || offlineSeconds > 0) && <div className="toast" role="status"><Sparkles /><span>{notice ?? `Caught up ${Math.round(offlineSeconds)} seconds of agent work.`}</span><button onClick={dismissNotice}>×</button></div>}
-      <Ending />
+      <input ref={importInputRef} type="file" accept="application/json,.json" hidden aria-label="Import Context Switch save" onChange={(event) => void onImport(event.target.files?.[0])} />
+      <Ending onRestart={() => void restartRun()} />
     </div>
   );
 }

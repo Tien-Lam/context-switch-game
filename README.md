@@ -18,7 +18,7 @@ Run `/help` in either provider session for its command reference and `mux` to in
 
 Waiting is not the challenge. Normal-speed agent runs reach review in roughly 3–16 seconds, with the tutorial completing in about 3 seconds. Parallel execution unlocks after that first shipment. The pressure comes from switching providers before quota becomes a bottleneck, reviewing multiple changes, accepting risky shortcuts, and fixing the consequences quickly.
 
-The player is the human judgment in the loop, so there is no artificial attention or energy meter. Planning and compaction consume provider quota, revisions consume another agent pass, and escalation spends organizational trust. Approval is immediate: the decision comes from the displayed change summary, test result, warning signal, diff scope, and estimated defect risk.
+The player is the human judgment in the loop, so there is no artificial attention or energy meter. Planning and compaction consume provider quota, revisions consume another agent pass, and escalation spends organizational trust while forfeiting the ticket's delivery reward. Approval is immediate: the decision comes from the displayed change summary, test result, warning signal, diff scope, review score, and explicit pass/blocked gate.
 
 ## Development
 

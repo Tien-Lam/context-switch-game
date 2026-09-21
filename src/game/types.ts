@@ -10,6 +10,7 @@ export interface SessionState {
   context: number;
   briefImproved: boolean;
   reviewRound: number;
+  workedInParallel: boolean;
 }
 
 export interface ReviewState {
@@ -23,6 +24,7 @@ export interface ReviewState {
 export interface GameEvent {
   id: string;
   at: number;
+  providerId?: string;
   tone: "info" | "good" | "warning" | "bad";
   title: string;
   message: string;
@@ -34,6 +36,7 @@ export interface GameStats {
   escalations: number;
   defects: number;
   quotaSpent: number;
+  activeSeconds: number;
 }
 
 export interface EndingState {
@@ -63,6 +66,7 @@ export interface GameState {
   flags: {
     cacheShortcut: boolean;
     privacyDefaultedOn: boolean;
+    runtimeDriftAccepted: boolean;
     raceAccepted: boolean;
     incidentAnnounced: boolean;
   };

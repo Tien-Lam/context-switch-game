@@ -41,6 +41,10 @@ export const TicketSchema = z.object({
     summary: z.string(),
     tests: z.string(),
     signal: z.string(),
+    resolution: z.object({
+      tests: z.string(),
+      signal: z.string(),
+    }).optional(),
   }),
   riskFlag: z.enum(["cache-shortcut", "privacy-default", "merge-race", "runtime-drift", "none"]),
 });
