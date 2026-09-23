@@ -1,7 +1,7 @@
 import { produce } from "immer";
 import { content, modelById, providerById, ticketById, upgradeById } from "../content";
 import { BALANCE } from "./balance";
-import { availableTickets, isModelUnlocked, isReviewBlocked } from "./selectors";
+import { availableTickets, incidentIsOpen, isModelUnlocked, isReviewBlocked } from "./selectors";
 import type { EndingState, GameEvent, GameState, ReviewDecision, SessionState } from "./types";
 
 export class GameRuleError extends Error {}
@@ -36,6 +36,7 @@ function resetSession(session: SessionState) {
   session.briefImproved = false;
   session.reviewRound = 0;
   session.workedInParallel = false;
+  session.reasoning = "medium";
   session.context = clamp(session.context + 2, 0, 100);
 }
 
@@ -44,6 +45,7 @@ function calculateReviewRisk(state: GameState, session: SessionState) {
   const model = modelById.get(session.modelId ?? "");
   if (!ticket || !model) return 0.5;
   const contextPenalty = Math.max(0, 80 - session.context) / 200;
+  const reasoningModifier = session.reasoning === "high" ? -0.09 : session.reasoning === "low" ? 0.07 : 0;
   const parallelPenalty = session.workedInParallel && !hasUpgrade(state, "worktree-isolation") ? 0.09 : 0;
   const briefingBonus = session.briefImproved ? 0.13 : 0;
   const playbookBonus = hasUpgrade(state, "repo-playbook") ? 0.07 : 0;
@@ -52,7 +54,7 @@ function calculateReviewRisk(state: GameState, session: SessionState) {
   const healthPenalty = Math.max(0, 70 - state.repoHealth) / 220;
 
   return clamp(
-    ticket.baseRisk + model.riskModifier + contextPenalty + parallelPenalty + healthPenalty
+    ticket.baseRisk + model.riskModifier + reasoningModifier + contextPenalty + parallelPenalty + healthPenalty
       - briefingBonus - playbookBonus - testBonus - revisionBonus,
     0.02,
     0.92,
@@ -61,8 +63,9 @@ function calculateReviewRisk(state: GameState, session: SessionState) {
 
 function computeEnding(state: GameState): EndingState {
   const reliability = clamp(Math.round(state.repoHealth - state.stats.defects * 7), 0, 100);
-  const activeTimePenalty = Math.max(0, (state.stats.activeSeconds - 75) / 5);
-  const throughput = clamp(Math.round(50 + state.stats.shipped * 6 - state.stats.revisions * 4 - state.stats.escalations * 5 - activeTimePenalty), 0, 100);
+  const elapsedTimePenalty = Math.max(0, (state.gameTime - 75) / 5);
+  const mainTicketsShipped = state.completedTicketIds.filter((id) => !ticketById.get(id)?.incidentFor).length;
+  const throughput = clamp(Math.round(50 + mainTicketsShipped * 6 - state.stats.revisions * 4 - state.stats.escalations * 5 - elapsedTimePenalty), 0, 100);
   const trust = clamp(Math.round(state.trust), 0, 100);
   const debt = clamp(Math.round(state.debt), 0, 100);
   const disciplined = reliability >= 78 && debt <= 20 && state.stats.defects <= 1;
@@ -72,10 +75,10 @@ function computeEnding(state: GameState): EndingState {
       ? "The demo works. Legal has follow-up questions."
       : "The demo works, provided nobody refreshes twice.";
   const consequences = [
-    state.flags.cacheShortcut ? "the dashboard cache served stale customer data" : "the cache audit stayed clean",
-    state.flags.privacyDefaultedOn ? "telemetry shipped with the wrong default" : "the privacy default held",
-    state.flags.runtimeDriftAccepted ? "the legacy runtime shim survived the audit" : "the runtime started cleanly",
-    state.flags.raceAccepted ? "the report race reached production" : "parallel exports remained isolated",
+    incidentIsOpen(state, "cache-shortcut") ? "the dashboard cache still served stale data" : state.flags.cacheShortcut ? "the cache shortcut was repaired" : "the cache audit stayed clean",
+    incidentIsOpen(state, "privacy-default") ? "telemetry still had the wrong default" : state.flags.privacyDefaultedOn ? "the privacy default was repaired" : "the privacy default held",
+    incidentIsOpen(state, "runtime-drift") ? "the legacy worker survived the audit" : state.flags.runtimeDriftAccepted ? "the legacy worker was removed" : "the runtime started cleanly",
+    incidentIsOpen(state, "merge-race") ? "the report race reached production" : state.flags.raceAccepted ? "the export race was repaired" : "parallel exports remained isolated",
   ];
   const message = `Your review history followed you into the room: ${consequences.join(", ")}.`;
   return { title, message, scores: { throughput, reliability, trust, debt } };
@@ -98,7 +101,16 @@ function unlockProgression(state: GameState) {
     addEvent(state, {
       tone: "info",
       title: "Parallel operator seat enabled",
-      message: "Both provider terminals can now run work at the same time. Their quota pools remain separate.",
+      message: "Both provider terminals can now run work at the same time. Their quota pools remain separate; switch tabs when one runs low.",
+    });
+  }
+  if (complete === 2) {
+    state.providerQuota.anthill = Math.max(0, state.providerQuota.anthill - 14);
+    addEvent(state, {
+      providerId: "anthill",
+      tone: "warning",
+      title: "Anthill changed the team plan",
+      message: "A fictional provider policy update removed 14 Anthill quota. OpenMind's pool is independent; use its tab for the next ticket or wait for regeneration.",
     });
   }
 }
@@ -108,13 +120,15 @@ function announceIncidentIfReady(state: GameState) {
   const prerequisitesDone = ["parallel-reports", "quota-display"].every((id) => state.completedTicketIds.includes(id));
   if (!prerequisitesDone) return;
   state.flags.incidentAnnounced = true;
-  if (!state.flags.cacheShortcut) {
+  if (!incidentIsOpen(state, "cache-shortcut")) {
     state.trust = clamp(state.trust + 2, 0, 100);
     state.peakTrust = Math.max(state.peakTrust, state.trust);
     addEvent(state, {
       tone: "good",
       title: "Pre-demo freshness audit passed",
-      message: "Support tried to reproduce stale customer summaries and failed. The PERF-204 review prevented an incident. +2 trust.",
+      message: state.flags.cacheShortcut
+        ? "Support could not reproduce stale summaries after FIX-204 repaired the shortcut. +2 trust."
+        : "Support tried to reproduce stale customer summaries and failed. The PERF-204 review prevented an incident. +2 trust.",
     });
     return;
   }
@@ -130,12 +144,9 @@ function announceIncidentIfReady(state: GameState) {
   });
 }
 
-function hasEvent(state: GameState, title: string) {
-  return state.events.some((event) => event.title === title);
-}
-
 function announceConsequences(state: GameState) {
-  if (state.flags.privacyDefaultedOn && state.completedTicketIds.includes("quota-display") && !hasEvent(state, "Enterprise disabled telemetry")) {
+  if (incidentIsOpen(state, "privacy-default") && state.completedTicketIds.includes("quota-display") && !state.flags.privacyConsequenceApplied) {
+    state.flags.privacyConsequenceApplied = true;
     state.trust = clamp(state.trust - 12, 0, 100);
     state.debt = clamp(state.debt + 4, 0, 100);
     addEvent(state, {
@@ -144,7 +155,8 @@ function announceConsequences(state: GameState) {
       message: "The implicit opt-in from APP-118 reached a customer workspace. Support opened a migration task. −12 trust, +4 debt.",
     });
   }
-  if (state.flags.runtimeDriftAccepted && state.completedTicketIds.includes("parallel-reports") && !hasEvent(state, "Audit found the legacy worker")) {
+  if (incidentIsOpen(state, "runtime-drift") && state.completedTicketIds.includes("parallel-reports") && !state.flags.runtimeConsequenceApplied) {
+    state.flags.runtimeConsequenceApplied = true;
     state.trust = clamp(state.trust - 8, 0, 100);
     state.repoHealth = clamp(state.repoHealth - 5, 0, 100);
     state.debt = clamp(state.debt + 5, 0, 100);
@@ -154,7 +166,8 @@ function announceConsequences(state: GameState) {
       message: "The compatibility shim from PLAT-77 kept one report worker on the unsupported runtime. −8 trust, −5 health, +5 debt.",
     });
   }
-  if (state.flags.raceAccepted && state.completedTicketIds.includes("stale-customer-data") && !hasEvent(state, "Two reports became one")) {
+  if (incidentIsOpen(state, "merge-race") && state.completedTicketIds.includes("stale-customer-data") && !state.flags.raceConsequenceApplied) {
+    state.flags.raceConsequenceApplied = true;
     state.trust = clamp(state.trust - 12, 0, 100);
     state.repoHealth = clamp(state.repoHealth - 4, 0, 100);
     addEvent(state, {
@@ -169,6 +182,22 @@ function completeTicket(state: GameState, session: SessionState, defect: boolean
   const ticket = ticketById.get(session.ticketId ?? "");
   const providerId = modelById.get(session.modelId ?? "")?.providerId;
   if (!ticket) throw new GameRuleError("Ticket no longer exists.");
+  if (ticket.incidentFor && defect) {
+    state.stats.defects += 1;
+    state.trust = clamp(state.trust - 6, 0, 100);
+    state.repoHealth = clamp(state.repoHealth - 7, 0, 100);
+    state.debt = clamp(state.debt + 9, 0, 100);
+    addEvent(state, {
+      providerId,
+      sessionId: session.id,
+      tone: "bad",
+      title: `${ticket.key} repair failed`,
+      message: "The blocked review left the incident unresolved. The repair ticket is back in the queue for another attempt.",
+    });
+    resetSession(session);
+    return;
+  }
+  const repairingIncident = ticket.incidentFor && incidentIsOpen(state, ticket.incidentFor);
   if (!state.completedTicketIds.includes(ticket.id)) state.completedTicketIds.push(ticket.id);
   state.stats.shipped += 1;
   const earnedTrust = rewardTrust ? ticket.rewardTrust : 0;
@@ -187,6 +216,7 @@ function completeTicket(state: GameState, session: SessionState, defect: boolean
 
   addEvent(state, {
     providerId,
+    sessionId: session.id,
     tone: defect ? "warning" : "good",
     title: `${ticket.key} shipped`,
     message: defect
@@ -195,6 +225,26 @@ function completeTicket(state: GameState, session: SessionState, defect: boolean
         ? `Clean delivery. +${ticket.rewardTrust} trust and a slightly healthier repository.`
         : "Senior review secured the delivery, but the interruption earned no delivery trust.",
   });
+  if (repairingIncident) {
+    state.repoHealth = clamp(state.repoHealth + 6, 0, 100);
+    state.debt = clamp(state.debt - 7, 0, 100);
+    addEvent(state, {
+      providerId,
+      sessionId: session.id,
+      tone: "good",
+      title: `${ticket.key} resolved the incident`,
+      message: "The follow-up fix closed the known defect, restored repository health, and reduced debt.",
+    });
+  }
+  if (defect && ticket.riskFlag !== "none") {
+    addEvent(state, {
+      providerId,
+      sessionId: session.id,
+      tone: "bad",
+      title: `${ticket.key} opened follow-up work`,
+      message: `A customer-visible risk escaped review. ${content.tickets.find((candidate) => candidate.incidentFor === ticket.riskFlag)?.key ?? "A repair ticket"} is now ready in the backlog.`,
+    });
+  }
   resetSession(session);
   unlockProgression(state);
   announceConsequences(state);
@@ -208,6 +258,7 @@ export function startTicket(
   ticketId: string,
   modelId: string,
   improveBrief = false,
+  reasoning: SessionState["reasoning"] = "medium",
 ) {
   if (source.ending) throw new GameRuleError("This run has ended.");
   const ticket = ticketById.get(ticketId);
@@ -218,7 +269,7 @@ export function startTicket(
   if (session.status !== "idle") throw new GameRuleError("That session is already occupied.");
   if (!availableTickets(source).some((candidate) => candidate.id === ticketId)) throw new GameRuleError("That ticket is not ready.");
   if (!isModelUnlocked(source, modelId)) throw new GameRuleError("That model is not available yet.");
-  const setupQuota = improveBrief ? BALANCE.improvedBriefQuotaCost : 0;
+  const setupQuota = (improveBrief ? BALANCE.improvedBriefQuotaCost : 0) + (reasoning === "high" ? 4 : 0);
   if ((source.providerQuota[model.providerId] ?? 0) < 2 + setupQuota) {
     throw new GameRuleError(improveBrief ? "That provider lacks the quota to plan before coding." : "That provider has no usable quota.");
   }
@@ -232,15 +283,17 @@ export function startTicket(
     target.reviewRound = 0;
     target.briefImproved = improveBrief;
     target.workedInParallel = false;
-    if (improveBrief) {
-      state.providerQuota[model.providerId] -= BALANCE.improvedBriefQuotaCost;
-      state.stats.quotaSpent += BALANCE.improvedBriefQuotaCost;
+    target.reasoning = reasoning;
+    if (setupQuota) {
+      state.providerQuota[model.providerId] -= setupQuota;
+      state.stats.quotaSpent += setupQuota;
     }
     addEvent(state, {
       providerId: model.providerId,
+      sessionId,
       tone: "info",
       title: `${ticket.key} → ${model.name}`,
-      message: `${improveBrief ? `The agent spent ${BALANCE.improvedBriefQuotaCost} quota clarifying acceptance criteria before coding.` : "The session started with the ticket exactly as written."} Estimated review in ${Math.max(1, Math.ceil(ticket.duration / model.speed))}s.`,
+      message: `${improveBrief ? "The agent clarified acceptance criteria before coding." : "The session started with the ticket exactly as written."} ${reasoning === "high" ? "High reasoning spent 4 extra quota for a lower review risk." : reasoning === "low" ? "Low reasoning saved setup quota but increased review risk." : ""} Estimated review in ${Math.max(1, Math.ceil(ticket.duration / model.speed))}s.`,
     });
   });
 }
@@ -277,6 +330,7 @@ export function advanceGame(source: GameState, elapsedSeconds: number) {
           });
           addEvent(state, {
             providerId: model.providerId,
+            sessionId: session.id,
             tone: "info",
             title: `${ticket.key} is ready for review`,
             message: `${model.name} is ${Math.round(session.context)}% context-coherent and ${Math.round((1 - state.reviews.at(-1)!.risk) * 100)}% confident.`,
@@ -382,6 +436,7 @@ export function advanceGame(source: GameState, elapsedSeconds: number) {
         });
         addEvent(state, {
           providerId: model.providerId,
+          sessionId: session.id,
           tone: "info",
           title: `${ticket.key} is ready for review`,
           message: `${model.name} is ${Math.round(session.context)}% context-coherent and ${Math.round((1 - state.reviews.at(-1)!.risk) * 100)}% confident.`,
@@ -412,7 +467,7 @@ export function reviewTicket(source: GameState, reviewId: string, decision: Revi
       session.progress = 0.62;
       session.reviewRound += 1;
       session.context = clamp(session.context + 6, 0, 100);
-      addEvent(state, { providerId: modelById.get(session.modelId ?? "")?.providerId, tone: "info", title: `${ticket.key} changes requested`, message: "The agent is addressing the visible risk with a narrower second pass." });
+      addEvent(state, { providerId: modelById.get(session.modelId ?? "")?.providerId, sessionId: session.id, tone: "info", title: `${ticket.key} changes requested`, message: "The agent is addressing the visible risk with a narrower second pass." });
       return;
     }
 
@@ -420,7 +475,7 @@ export function reviewTicket(source: GameState, reviewId: string, decision: Revi
       state.stats.escalations += 1;
       state.trust = clamp(state.trust - BALANCE.escalationTrustCost, 0, 100);
       state.debt = clamp(state.debt - 2, 0, 100);
-      addEvent(state, { providerId: modelById.get(session.modelId ?? "")?.providerId, tone: "good", title: `${ticket.key} escalated`, message: `A senior review corrected the risky path before shipping. The interruption cost ${BALANCE.escalationTrustCost} trust.` });
+      addEvent(state, { providerId: modelById.get(session.modelId ?? "")?.providerId, sessionId: session.id, tone: "good", title: `${ticket.key} escalated`, message: `A senior review corrected the risky path before shipping. The interruption cost ${BALANCE.escalationTrustCost} trust.` });
       completeTicket(state, session, false, false);
       return;
     }
@@ -442,7 +497,7 @@ export function compactSession(source: GameState, sessionId: number) {
     state.stats.quotaSpent += BALANCE.compactQuotaCost;
     target.context = 88;
     target.progress = Math.max(0, target.progress - 0.08);
-    addEvent(state, { providerId: model.providerId, tone: "info", title: `Session ${sessionId + 1} compacted`, message: `The summary used ${BALANCE.compactQuotaCost} provider quota, recovered context, and lost a little implementation momentum.` });
+    addEvent(state, { providerId: model.providerId, sessionId, tone: "info", title: `Session ${sessionId + 1} compacted`, message: `The summary used ${BALANCE.compactQuotaCost} provider quota, recovered context, and lost a little implementation momentum.` });
   });
 }
 

@@ -25,7 +25,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { content, modelById, providerById, ticketById } from "../content";
 import { BALANCE } from "../game/balance";
-import { availableModels, availableTickets, isReviewBlocked, ticketProgressLabel } from "../game/selectors";
+import { availableModels, availableTickets, isReviewBlocked, reviewRiskFactors, ticketProgressLabel, visibleTickets } from "../game/selectors";
 import type { GameState, SessionState } from "../game/types";
 import { useGameStore } from "../app/store";
 import { commandSuggestions, evaluateCommand, type CliEffect, type CliMessage, type PaneMode, type PermissionMode, type ReasoningMode } from "./cli";
@@ -171,11 +171,11 @@ function SessionCard({ session, game }: { session: SessionState; game: GameState
 function Backlog({ game }: { game: GameState }) {
   return (
     <section className="panel backlog-panel">
-      <div className="panel-heading"><div><span className="eyebrow">Work queue</span><h2>Backlog</h2></div><span className="count-badge">{content.tickets.length - game.completedTicketIds.length}</span></div>
+      <div className="panel-heading"><div><span className="eyebrow">Work queue</span><h2>Backlog</h2></div><span className="count-badge">{visibleTickets(game).length - game.completedTicketIds.length}</span></div>
       <div className="ticket-list">
-        {content.tickets.map((ticket) => {
+        {visibleTickets(game).map((ticket) => {
           const status = ticketProgressLabel(game, ticket.id);
-          const blocked = !ticket.prerequisites.every((id) => game.completedTicketIds.includes(id));
+          const blocked = status === "Blocked";
           return (
             <article className={`ticket-row ${status === "Shipped" ? "ticket-done" : ""} ${blocked ? "ticket-blocked" : ""}`} key={ticket.id}>
               <div className={`ticket-kind kind-${ticket.kind}`}><FileCode2 /></div>
@@ -201,14 +201,14 @@ function ReviewQueue({ game }: { game: GameState }) {
             const session = game.sessions[item.sessionId];
             const unresolvedFinding = isReviewBlocked(game, item);
             const riskLabel = unresolvedFinding ? "Blocked" : "Gate passed";
-            const resolution = ticket.riskFlag !== "none" && !unresolvedFinding ? ticket.evidence.resolution : undefined;
+            const resolution = ticket.riskFlag !== "none" && (session.reviewRound > 0 || (session.briefImproved && item.risk < 0.2)) ? ticket.evidence.resolution : undefined;
             return (
               <article className="review-card" key={item.id}>
                 <div className="review-top"><div><span className="eyebrow">{ticket.key}</span><h3>{ticket.title}</h3></div><span className={`risk ${unresolvedFinding ? "risk-high-risk" : "risk-low-risk"}`}>{riskLabel} · {Math.round(item.risk * 100)}/100</span></div>
                 <p>{session.reviewRound > 0 ? `Revised: ${ticket.evidence.summary}` : ticket.evidence.summary}</p>
-                <ul className="evidence-list"><li><Check />{resolution?.tests ?? ticket.evidence.tests}</li><li><AlertTriangle />{resolution?.signal ?? ticket.evidence.signal}</li><li><FileCode2 />{ticket.files.join(" · ")}</li></ul>
+                <ul className="evidence-list"><li><Check />{resolution?.tests ?? ticket.evidence.tests}</li><li><AlertTriangle />{resolution?.signal ?? ticket.evidence.signal}</li><li><FileCode2 />{ticket.files.join(" · ")}</li><li><CircleGauge />Risk: {reviewRiskFactors(game, item)}</li></ul>
                 <div className="review-actions">
-                  <button onClick={() => review(item.id, "approve")}><Check />Approve <span>{unresolvedFinding ? "known defect" : "ship now"}</span></button>
+                  <button onClick={() => review(item.id, "approve")}><Check />Approve <span>{unresolvedFinding ? item.risk >= 0.6 ? "high-risk change" : "known defect" : "ship now"}</span></button>
                   <button onClick={() => review(item.id, "revise")}><RefreshCcw />Revise <span>resolve finding</span></button>
                   <button disabled={game.trust < BALANCE.escalationTrustCost} onClick={() => review(item.id, "escalate")}><Sparkles />Escalate <span>{game.trust >= BALANCE.escalationTrustCost ? `−${BALANCE.escalationTrustCost} trust · no reward` : `need ${BALANCE.escalationTrustCost} trust`}</span></button>
                 </div>
@@ -317,6 +317,7 @@ interface TerminalTabState {
   kind: "provider" | "monitor";
   providerId?: string;
   modelId?: string;
+  boundSessionId?: number;
   permissionMode?: PermissionMode;
   reasoning?: ReasoningMode;
   view?: PaneMode;
@@ -413,7 +414,7 @@ function MonitorPane({ mode, game }: { mode: PaneMode; game: GameState }) {
         <div className="mux-pane-title"><span>dashboard.live</span><span>UPGRADE</span></div>
         <ResourceBar game={game} />
         <div className="dashboard-summary">
-          <div><span>shipped</span><strong>{game.completedTicketIds.length}/{content.tickets.length}</strong></div>
+          <div><span>shipped</span><strong>{game.completedTicketIds.length}/{visibleTickets(game).length}</strong></div>
           <div><span>reviews</span><strong>{game.reviews.length}</strong></div>
           <div><span>debt</span><strong>{Math.round(game.debt)}</strong></div>
         </div>
@@ -446,13 +447,27 @@ export function App() {
   const importSave = useGameStore((store) => store.importSave);
   const [tabs, setTabs] = useState<TerminalTabState[]>(loadTerminalTabs);
   const [activeTabId, setActiveTabId] = useState(() => tabs[0].id);
+  const [paneTabId, setPaneTabId] = useState<string | null>(() => localStorage.getItem("context-switch-pane-tab-v1"));
+  const [soundEnabled, setSoundEnabled] = useState(() => localStorage.getItem("context-switch-sound-v1") === "on");
+  const [reduceMotion, setReduceMotion] = useState(() => localStorage.getItem("context-switch-motion-v1") === "reduce");
   const outputRef = useRef<HTMLDivElement>(null);
+  const secondaryOutputRef = useRef<HTMLDivElement>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
   const lastEventId = useRef<string | null>(null);
+  const audioRef = useRef<AudioContext | null>(null);
   const currentTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
   const occupiedSessions = useMemo(() => game.sessions.filter((session) => session.status !== "idle").length, [game.sessions]);
   const multiTabUnlocked = game.completedTicketIds.length >= 1;
   const operationsUnlocked = game.completedTicketIds.length >= 3;
+  const secondaryTab = operationsUnlocked && paneTabId !== activeTabId ? tabs.find((tab) => tab.id === paneTabId) : undefined;
+
+  const activateAudio = () => {
+    try {
+      const audio = audioRef.current ?? new AudioContext();
+      audioRef.current = audio;
+      void audio.resume();
+    } catch { /* Sound is optional when Web Audio is unavailable. */ }
+  };
 
   const updateTab = (id: string, update: (tab: TerminalTabState) => TerminalTabState) => {
     setTabs((current) => current.map((tab) => tab.id === id ? update(tab) : tab));
@@ -467,15 +482,46 @@ export function App() {
       return;
     }
     const next = createProviderTab(providerId, name);
-    setTabs((current) => [...current, next].slice(-8));
+    if (tabs.length >= 8) {
+      appendLines(activeTabId, [terminalLine("error", "error: eight tabs are open; close one before attaching another")]);
+      return;
+    }
+    setTabs((current) => [...current, next]);
     setActiveTabId(next.id);
   };
   const openView = (view: PaneMode) => {
     const existing = tabs.find((tab) => tab.kind === "monitor" && tab.view === view);
     if (existing) { setActiveTabId(existing.id); return; }
+    if (tabs.length >= 8) {
+      appendLines(activeTabId, [terminalLine("error", "error: eight tabs are open; close one before opening a monitor")]);
+      return;
+    }
     const next = createMonitorTab(view);
-    setTabs((current) => [...current, next].slice(-8));
+    setTabs((current) => [...current, next]);
     setActiveTabId(next.id);
+  };
+  const splitPane = (target: string, sourceTabId: string) => {
+    if (!operationsUnlocked) return;
+    const numeric = Number(target);
+    if (Number.isInteger(numeric) && numeric >= 1 && numeric <= tabs.length) {
+      const selected = tabs[numeric - 1];
+      if (selected.id === sourceTabId || selected.id === activeTabId) {
+        appendLines(sourceTabId, [terminalLine("error", "error: choose a different tab for the second pane")]);
+        return;
+      }
+      setPaneTabId(selected.id);
+      return;
+    }
+    const view = target as PaneMode;
+    const existing = tabs.find((tab) => tab.kind === "monitor" && tab.view === view);
+    if (existing) { setPaneTabId(existing.id); return; }
+    if (tabs.length >= 8) {
+      appendLines(sourceTabId, [terminalLine("error", "error: eight tabs are open; close one before opening a monitor")]);
+      return;
+    }
+    const next = createMonitorTab(view);
+    setTabs((current) => [...current, next]);
+    setPaneTabId(next.id);
   };
   const closeTab = (id: string) => {
     if (tabs.length === 1) {
@@ -484,8 +530,13 @@ export function App() {
     }
     const index = tabs.findIndex((tab) => tab.id === id);
     const remaining = tabs.filter((tab) => tab.id !== id);
+    if (paneTabId === id) setPaneTabId(null);
     setTabs(remaining);
-    if (activeTabId === id) setActiveTabId(remaining[Math.max(0, index - 1)]?.id ?? remaining[0].id);
+    if (activeTabId === id) {
+      const nextActive = remaining[Math.max(0, index - 1)]?.id ?? remaining[0].id;
+      setActiveTabId(nextActive);
+      if (paneTabId === nextActive) setPaneTabId(null);
+    }
   };
   const cycleTabs = (direction: 1 | -1) => {
     const index = tabs.findIndex((tab) => tab.id === activeTabId);
@@ -508,16 +559,30 @@ export function App() {
     const defaults = defaultTerminalTabs();
     setTabs(defaults);
     setActiveTabId(defaults[0].id);
+    setPaneTabId(null);
   };
   const onImport = async (file?: File) => {
-    if (file) await importSave(await file.text());
+    if (file && window.confirm("Replace the current run with this local save?")) {
+      const imported = await importSave(await file.text());
+      if (imported) {
+        const defaults = defaultTerminalTabs();
+        setTabs(defaults);
+        setActiveTabId(defaults[0].id);
+        setPaneTabId(null);
+      }
+    }
     if (importInputRef.current) importInputRef.current.value = "";
   };
 
   const applyEffect = async (effect: CliEffect, tabId: string) => {
     const store = useGameStore.getState();
     let failure: string | null = null;
-    if (effect.type === "assign") failure = store.assign(effect.sessionId, effect.ticketId, effect.modelId, effect.improveBrief);
+    if (effect.type === "assign") failure = store.assign(effect.sessionId, effect.ticketId, effect.modelId, effect.improveBrief, effect.reasoning);
+    if (effect.type === "assign" && !failure) {
+      setTabs((current) => current.map((tab) => tab.id === tabId
+        ? { ...tab, boundSessionId: effect.sessionId }
+        : tab.boundSessionId === effect.sessionId ? { ...tab, boundSessionId: undefined } : tab));
+    }
     if (effect.type === "review") failure = store.review(effect.reviewId, effect.decision);
     if (effect.type === "compact") failure = store.compact(effect.sessionId);
     if (effect.type === "purchase") failure = store.purchase(effect.upgradeId);
@@ -531,6 +596,11 @@ export function App() {
     if (effect.type === "tab-close") closeTab(tabId);
     if (effect.type === "tab-rename") updateTab(tabId, (tab) => ({ ...tab, name: effect.name }));
     if (effect.type === "open-view") openView(effect.mode);
+    if (effect.type === "pane-split") splitPane(effect.target, tabId);
+    if (effect.type === "pane-close") setPaneTabId(null);
+    if (effect.type === "pane-swap" && secondaryTab) { setActiveTabId(secondaryTab.id); setPaneTabId(activeTabId); }
+    if (effect.type === "sound") { if (effect.enabled) activateAudio(); setSoundEnabled(effect.enabled); }
+    if (effect.type === "motion") setReduceMotion(effect.reduced);
     if (effect.type === "export") {
       const url = URL.createObjectURL(new Blob([store.exportSave()], { type: "application/json" }));
       const anchor = document.createElement("a");
@@ -548,11 +618,12 @@ export function App() {
   const execute = async (raw: string, tabId = activeTabId) => {
     const command = raw.trim();
     if (!command) return;
+    if (soundEnabled) activateAudio();
     const tab = tabs.find((candidate) => candidate.id === tabId);
     if (!tab || tab.kind !== "provider" || !tab.providerId) return;
     updateTab(tabId, (tab) => ({ ...tab, input: "", commands: [...tab.commands, command].slice(-60), commandCursor: tab.commands.length + 1 }));
     appendLines(tabId, [terminalLine("command", command)]);
-    const result = evaluateCommand(command, useGameStore.getState().game, { providerId: tab.providerId, modelId: tab.modelId, permissionMode: tab.permissionMode, reasoning: tab.reasoning });
+    const result = evaluateCommand(command, useGameStore.getState().game, { providerId: tab.providerId, modelId: tab.modelId, permissionMode: tab.permissionMode, reasoning: tab.reasoning, sessionId: tab.boundSessionId ?? null });
     if (result.messages.length) appendLines(tabId, result.messages.map((message) => terminalLine(message.kind, message.text)));
     if (result.effect) await applyEffect(result.effect, tabId);
   };
@@ -568,6 +639,12 @@ export function App() {
   }, [hydrate, hydrated, persist, pulse, reconcile]);
   useEffect(() => { localStorage.setItem("context-switch-terminal-tabs-v2", JSON.stringify(tabs)); }, [tabs]);
   useEffect(() => {
+    if (paneTabId) localStorage.setItem("context-switch-pane-tab-v1", paneTabId);
+    else localStorage.removeItem("context-switch-pane-tab-v1");
+  }, [paneTabId]);
+  useEffect(() => { localStorage.setItem("context-switch-sound-v1", soundEnabled ? "on" : "off"); }, [soundEnabled]);
+  useEffect(() => { localStorage.setItem("context-switch-motion-v1", reduceMotion ? "reduce" : "auto"); }, [reduceMotion]);
+  useEffect(() => {
     const newest = game.events[0];
     if (!newest) return;
     if (lastEventId.current === null) { lastEventId.current = newest.id; return; }
@@ -576,14 +653,37 @@ export function App() {
     const fresh = game.events.slice(0, previousIndex >= 0 ? previousIndex : 1).reverse();
     lastEventId.current = newest.id;
     for (const event of fresh) {
+      if (soundEnabled && event.title.includes("ready for review")) {
+        try {
+          const audio = audioRef.current ?? new AudioContext();
+          audioRef.current = audio;
+          const tone = audio.createOscillator();
+          const gain = audio.createGain();
+          tone.type = "sine";
+          tone.frequency.value = 660;
+          gain.gain.setValueAtTime(0.035, audio.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + 0.12);
+          tone.connect(gain).connect(audio.destination);
+          tone.start();
+          tone.stop(audio.currentTime + 0.12);
+        } catch { /* Browser audio may be unavailable until interaction. */ }
+      }
+      const boundTarget = event.sessionId === undefined ? undefined : tabs.find((tab) => tab.kind === "provider" && tab.boundSessionId === event.sessionId)?.id;
       const providerTarget = event.providerId
         ? tabs.find((tab) => tab.kind === "provider" && tab.providerId === event.providerId)?.id
         : undefined;
-      const target = providerTarget ?? (currentTab.kind === "provider" ? activeTabId : tabs.find((tab) => tab.kind === "provider")?.id);
+      const target = boundTarget ?? providerTarget ?? (currentTab.kind === "provider" ? activeTabId : tabs.find((tab) => tab.kind === "provider")?.id);
       if (target) appendLines(target, [terminalLine("event", `[${event.tone}] ${event.title}\n${event.message}`)]);
     }
-  }, [game.events]);
-  useEffect(() => { outputRef.current?.scrollTo({ top: outputRef.current.scrollHeight, behavior: "smooth" }); }, [activeTabId, currentTab?.history.length]);
+  }, [game.events, soundEnabled]);
+  useEffect(() => {
+    for (const output of [outputRef.current, secondaryOutputRef.current]) {
+      output?.scrollTo({
+        top: output.scrollHeight,
+        behavior: reduceMotion || window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+      });
+    }
+  }, [activeTabId, paneTabId, currentTab?.history.length, secondaryTab?.history.length, reduceMotion]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key === "Tab") {
@@ -602,34 +702,56 @@ export function App() {
 
   if (!hydrated) return <main className="loading-screen"><CircleGauge /><p>Attaching operator console…</p></main>;
 
-  const onInputKey = (event: React.KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === "Enter") void execute(currentTab.input);
+  const onInputKey = (event: React.KeyboardEvent<HTMLInputElement>, tab: TerminalTabState) => {
+    if (event.key === "Enter") void execute(tab.input, tab.id);
     if (event.key === "ArrowUp") {
       event.preventDefault();
-      const next = Math.max(0, currentTab.commandCursor - 1);
-      updateTab(activeTabId, (tab) => ({ ...tab, commandCursor: next, input: tab.commands[next] ?? tab.input }));
+      const next = Math.max(0, tab.commandCursor - 1);
+      updateTab(tab.id, (current) => ({ ...current, commandCursor: next, input: current.commands[next] ?? current.input }));
     }
     if (event.key === "ArrowDown") {
       event.preventDefault();
-      const next = Math.min(currentTab.commands.length, currentTab.commandCursor + 1);
-      updateTab(activeTabId, (tab) => ({ ...tab, commandCursor: next, input: tab.commands[next] ?? "" }));
+      const next = Math.min(tab.commands.length, tab.commandCursor + 1);
+      updateTab(tab.id, (current) => ({ ...current, commandCursor: next, input: current.commands[next] ?? "" }));
     }
   };
 
   const currentProvider = currentTab.providerId ? providerById.get(currentTab.providerId) : undefined;
   const currentModel = currentTab.modelId ? modelById.get(currentTab.modelId) : undefined;
-  const currentSession = currentTab.providerId ? game.sessions.find((session) => modelById.get(session.modelId ?? "")?.providerId === currentTab.providerId && session.status !== "idle") : undefined;
+  const currentSession = currentTab.boundSessionId !== undefined
+    ? game.sessions[currentTab.boundSessionId]
+    : undefined;
   const contextRemaining = Math.round(currentSession?.context ?? 100);
   const quotaRemaining = currentTab.providerId ? Math.round(game.providerQuota[currentTab.providerId] ?? 0) : 0;
   const shellCommand = currentTab.kind === "monitor" ? `watch ${currentTab.view}` : currentTab.providerId === "openmind" ? "forge" : "anthill";
+  const renderPane = (tab: TerminalTabState, secondary = false) => {
+    const provider = tab.providerId ? providerById.get(tab.providerId) : undefined;
+    return (
+      <div className={`terminal-pane ${secondary ? "secondary-pane" : "primary-pane"} ${tab.kind === "monitor" ? "tool-view" : `provider-${tab.providerId}`}`} key={tab.id}>
+        {secondary && <div className="pane-heading"><span>{tab.name} · LIVE</span><div><button onClick={() => { setActiveTabId(tab.id); setPaneTabId(null); }}>Fill window</button><button onClick={() => setPaneTabId(null)} aria-label="Close second pane">×</button></div></div>}
+        {tab.kind === "provider" ? (
+          <section className="terminal-shell" aria-label={`${provider?.name} session`}>
+            <div className="terminal-output" ref={secondary ? secondaryOutputRef : outputRef} role="log" aria-live="polite">
+              {tab.history.map((line) => <div className={`terminal-line line-${line.kind}`} key={line.id}>{line.kind === "command" && <span className="line-prompt">{tab.providerId === "openmind" ? "›" : ">"}</span>}<pre>{line.text}</pre></div>)}
+              <div className="command-launchers" aria-label={`${provider?.name} suggested commands`}>{commandSuggestions(tab.providerId ?? "anthill", game).map((command) => <button key={command} onClick={() => void execute(command, tab.id)}>{command}</button>)}</div>
+            </div>
+            <div className={`terminal-prompt prompt-${tab.providerId}`}>
+              <span className="provider-chevron">{tab.providerId === "openmind" ? "›" : ">"}</span>
+              <input autoFocus={!secondary} aria-label={`${provider?.name} command`} placeholder={tab.providerId === "openmind" ? "Describe a task or /command" : "Message Anthill Code…"} autoComplete="off" spellCheck={false} value={tab.input} onChange={(event) => updateTab(tab.id, (current) => ({ ...current, input: event.target.value }))} onKeyDown={(event) => onInputKey(event, tab)} />
+            </div>
+          </section>
+        ) : tab.view ? <MonitorPane mode={tab.view} game={game} /> : null}
+      </div>
+    );
+  };
 
   return (
-    <div className="terminal-desktop">
+    <div className={`terminal-desktop ${reduceMotion ? "motion-off" : ""}`}>
       <section className="terminal-window" aria-label="Context Switch operator terminal">
         <header className="terminal-titlebar">
           <div className="window-lights" aria-hidden="true"><span /><span /><span /></div>
           <div className="terminal-window-title"><Terminal />{currentProvider?.name ?? currentTab.name} · ~/delivery</div>
-          <div className="terminal-window-meta"><span className="online-dot">LIVE</span><span>{clock(game.gameTime)}</span><span>{speed}×</span></div>
+          <div className="terminal-window-meta"><span className="online-dot">LIVE</span><span>{clock(game.gameTime)}</span><span>{speed}×</span><button className="header-setting" aria-label={soundEnabled ? "Mute sounds" : "Enable sounds"} aria-pressed={soundEnabled} onClick={() => { if (!soundEnabled) activateAudio(); setSoundEnabled((value) => !value); }}>{soundEnabled ? "♪" : "♪̸"}</button><button className="header-setting" aria-label={reduceMotion ? "Use system motion setting" : "Reduce motion"} aria-pressed={reduceMotion} onClick={() => setReduceMotion((value) => !value)}>◌</button></div>
         </header>
 
         <nav className="terminal-tabs" aria-label="Terminal tabs" role="tablist">
@@ -646,27 +768,17 @@ export function App() {
 
         <div className="terminal-contextbar">
           <span><b>$</b> {shellCommand}</span>
-          <span>{occupiedSessions}/{game.unlockedSessions} slots</span><span>{game.reviews.length} reviews</span><span>{Math.round(game.debt)} debt</span><span>{game.completedTicketIds.length}/{content.tickets.length} shipped</span>
+          <span>{occupiedSessions}/{game.unlockedSessions} slots</span><span>{game.reviews.length} reviews</span><span>{Math.round(game.debt)} debt</span><span>{game.completedTicketIds.length} shipped</span>
         </div>
 
-        <div id="terminal-panel" role="tabpanel" aria-labelledby={`terminal-tab-${currentTab.id}`} className={`terminal-workspace ${currentTab.kind === "monitor" ? "tool-view" : `provider-${currentTab.providerId}`}`}>
-          {currentTab.kind === "provider" ? (
-            <section className="terminal-shell" aria-label={`${currentProvider?.name} session`}>
-              <div className="terminal-output" ref={outputRef} role="log" aria-live="polite">
-                {currentTab.history.map((line) => <div className={`terminal-line line-${line.kind}`} key={line.id}>{line.kind === "command" && <span className="line-prompt">{currentTab.providerId === "openmind" ? "›" : ">"}</span>}<pre>{line.text}</pre></div>)}
-                <div className="command-launchers" aria-label={`${currentProvider?.name} suggested commands`}>{commandSuggestions(currentTab.providerId ?? "anthill", game).map((command) => <button key={command} onClick={() => void execute(command)}>{command}</button>)}</div>
-              </div>
-              <div className={`terminal-prompt prompt-${currentTab.providerId}`}>
-                <span className="provider-chevron">{currentTab.providerId === "openmind" ? "›" : ">"}</span>
-                <input autoFocus aria-label={`${currentProvider?.name} command`} placeholder={currentTab.providerId === "openmind" ? "Describe a task or /command" : "Message Anthill Code…"} autoComplete="off" spellCheck={false} value={currentTab.input} onChange={(event) => updateTab(activeTabId, (tab) => ({ ...tab, input: event.target.value }))} onKeyDown={onInputKey} />
-              </div>
-            </section>
-          ) : currentTab.view ? <MonitorPane mode={currentTab.view} game={game} /> : null}
+        <div id="terminal-panel" role="tabpanel" aria-labelledby={`terminal-tab-${currentTab.id}`} className={`terminal-workspace ${secondaryTab ? "with-pane" : ""}`}>
+          {renderPane(currentTab)}
+          {secondaryTab && renderPane(secondaryTab, true)}
         </div>
 
         <footer className={`mux-statusbar status-${currentTab.providerId ?? currentTab.kind}`}>
           <div className="mux-session-list">{tabs.map((tab, index) => <button className={tab.id === activeTabId ? "active" : ""} onClick={() => setActiveTabId(tab.id)} key={tab.id}>{index + 1}:{tab.name}{tab.id === activeTabId ? "*" : ""}</button>)}</div>
-          <div>{currentTab.kind === "provider" ? <><span>{currentSession?.ticketId ? `${ticketById.get(currentSession.ticketId)?.key} ${currentSession.status}` : "idle"} · {currentModel?.name} {currentTab.providerId === "openmind" ? currentTab.reasoning : currentTab.permissionMode}</span><span>{quotaRemaining} quota</span><span>{contextRemaining}% context</span></> : <span>{operationsUnlocked ? `full-window:${currentTab.view}` : "operations locked"}</span>}<span>ctrl-tab next</span></div>
+          <div>{currentTab.kind === "provider" ? <><span>{currentSession?.ticketId ? `${ticketById.get(currentSession.ticketId)?.key} ${currentSession.status}` : "idle"} · {currentModel?.name} {currentTab.providerId === "openmind" ? currentTab.reasoning : currentTab.permissionMode}</span><span>{quotaRemaining} quota</span><span>{contextRemaining}% context</span></> : <span>{operationsUnlocked ? `full-window:${currentTab.view}` : "operations locked"}</span>}{secondaryTab && <span>split:{secondaryTab.name}</span>}<span>ctrl-tab next</span></div>
         </footer>
       </section>
 

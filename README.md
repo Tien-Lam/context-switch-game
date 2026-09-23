@@ -9,10 +9,14 @@ Everything in the game is simulated. It does not call an AI service, connect to 
 - Start with full-window **Anthill Code** and **OpenMind Forge** sessions, each with its own prompt, models, slash commands, and quota pool.
 - Ship one ticket to unlock additional provider sessions.
 - Ship two tickets to unlock workspace naming.
-- Ship three tickets to unlock full-window operations tabs.
+- Ship three tickets to unlock full-window operations tabs and a true second pane. Use `pane split agents`, `pane split reviews`, or `pane split 2` to monitor work or operate another provider CLI alongside the current one. Use `pane swap` and `pane close` to manage the layout.
 - Buy the `terminal-dashboard` upgrade to add the graphical live dashboard as a dedicated tab.
 
 Run `/help` in either provider session for its command reference and `mux` to inspect terminal unlocks.
+
+Risky approvals can open short `FIX-*` incident tickets. They appear only after the related defect escapes review. Completing the repair before the later audit prevents that consequence; an unresolved incident changes the final ledger and ending.
+
+The second shipment triggers a fictional Anthill plan change. Its quota reduction makes the independent OpenMind pool useful early in the shift. `trace` shows the current run's local events and counters. `sound on|off` and `motion reduce|auto` control optional review chimes and animation; the title bar exposes both settings. No usage data leaves the browser.
 
 ## Pacing principle
 
@@ -33,6 +37,12 @@ Quality gate:
 ```sh
 mise exec -- bun run check
 ```
+
+## Alpha build
+
+`mise exec -- bun run build` creates a static site in `dist/`. The build uses relative asset paths so it can be served from a domain root or a subdirectory. Serve the directory over HTTPS with any static host; the game uses browser-local IndexedDB and localStorage for saves. Export a save before clearing site data or switching browsers. The game has no server or external AI dependency.
+
+This is a short scripted first-shift alpha. The main route has nine tickets, with four conditional incident repairs. Real-player timing and a longer 20–30 minute chapter remain to be validated before a wider release.
 
 Browser smoke tests, after Playwright's project-local browser is available:
 

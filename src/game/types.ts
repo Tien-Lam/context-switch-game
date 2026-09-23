@@ -11,6 +11,7 @@ export interface SessionState {
   briefImproved: boolean;
   reviewRound: number;
   workedInParallel: boolean;
+  reasoning: "low" | "medium" | "high";
 }
 
 export interface ReviewState {
@@ -25,6 +26,7 @@ export interface GameEvent {
   id: string;
   at: number;
   providerId?: string;
+  sessionId?: number;
   tone: "info" | "good" | "warning" | "bad";
   title: string;
   message: string;
@@ -69,6 +71,9 @@ export interface GameState {
     runtimeDriftAccepted: boolean;
     raceAccepted: boolean;
     incidentAnnounced: boolean;
+    privacyConsequenceApplied: boolean;
+    runtimeConsequenceApplied: boolean;
+    raceConsequenceApplied: boolean;
   };
   stats: GameStats;
   events: GameEvent[];

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseSave, SAVE_VERSION, serialiseSave } from "../src/app/persistence";
+import { newestSave, parseSave, SAVE_VERSION, serialiseSave } from "../src/app/persistence";
 import { content } from "../src/content";
 import { advanceGame, startTicket } from "../src/game/engine";
 import { createInitialState } from "../src/game/initialState";
@@ -12,6 +12,16 @@ describe("save envelope", () => {
     expect(parsed.version).toBe(SAVE_VERSION);
     expect(parsed.savedAt).toBe(123456);
     expect(parsed.game).toEqual(state);
+  });
+
+  it("recovers the newest valid snapshot when persistent storage lags", () => {
+    const oldSave = parseSave(serialiseSave(createInitialState(), 1_000));
+    const latest = createInitialState();
+    latest.completedTicketIds.push("deployment-banner");
+    const emergency = parseSave(serialiseSave(latest, 2_000));
+
+    expect(newestSave(oldSave, emergency)).toBe(emergency);
+    expect(newestSave(emergency, oldSave)).toBe(emergency);
   });
 
   it("makes offline catch-up equivalent to normal elapsed simulation", () => {
@@ -65,6 +75,25 @@ describe("save envelope", () => {
     expect(parsed.game.flags.runtimeDriftAccepted).toBe(false);
   });
 
+  it("infers already-applied consequences from version four saves", () => {
+    const prior = createInitialState();
+    prior.flags.privacyDefaultedOn = true;
+    prior.completedTicketIds = ["deployment-banner", "telemetry-toggle", "quota-display"];
+    const parsed = parseSave(JSON.stringify({ version: 4, savedAt: 123456, game: prior }));
+
+    expect(parsed.game.flags.privacyConsequenceApplied).toBe(true);
+    expect(parsed.game.flags.runtimeConsequenceApplied).toBe(false);
+    expect(parsed.game.flags.raceConsequenceApplied).toBe(false);
+  });
+
+  it("defaults earlier active sessions to medium reasoning", () => {
+    const prior = createInitialState();
+    const legacy = { ...prior, sessions: prior.sessions.map(({ reasoning, ...session }) => { void reasoning; return session; }) };
+    const parsed = parseSave(JSON.stringify({ version: 5, savedAt: 123456, game: legacy }));
+
+    expect(parsed.game.sessions.every((session) => session.reasoning === "medium")).toBe(true);
+  });
+
   it("rejects unsupported data", () => {
     expect(() => parseSave('{"version":99}')).toThrow(/invalid/i);
   });
@@ -76,5 +105,9 @@ describe("save envelope", () => {
     const invalidReview = createInitialState();
     invalidReview.reviews.push({ id: "bad", ticketId: "missing", sessionId: 99, risk: 0.2, createdAt: 1 });
     expect(() => parseSave(JSON.stringify({ version: SAVE_VERSION, savedAt: 123456, game: invalidReview }))).toThrow(/invalid/i);
+
+    const orphanedReview = createInitialState();
+    orphanedReview.reviews.push({ id: "orphan", ticketId: "deployment-banner", sessionId: 1, risk: 0.2, createdAt: 1 });
+    expect(() => parseSave(JSON.stringify({ version: SAVE_VERSION, savedAt: 123456, game: orphanedReview }))).toThrow(/invalid/i);
   });
 });

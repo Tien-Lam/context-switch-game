@@ -12,6 +12,7 @@ function createSession(id: number): SessionState {
     briefImproved: false,
     reviewRound: 0,
     workedInParallel: false,
+    reasoning: "medium",
   };
 }
 
@@ -35,6 +36,9 @@ export function createInitialState(): GameState {
       runtimeDriftAccepted: false,
       raceAccepted: false,
       incidentAnnounced: false,
+      privacyConsequenceApplied: false,
+      runtimeConsequenceApplied: false,
+      raceConsequenceApplied: false,
     },
     stats: {
       shipped: 0,

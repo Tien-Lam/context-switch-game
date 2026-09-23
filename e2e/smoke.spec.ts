@@ -102,3 +102,100 @@ test("starting another shift resets terminal tabs and history", async ({ page })
   await expect(page.getByRole("tab", { name: "old-operations" })).toHaveCount(0);
   await expect(page.getByText("old terminal history")).toHaveCount(0);
 });
+
+test("unlocked multiplexer shows two independently usable provider panes", async ({ page }) => {
+  const game = createInitialState();
+  game.completedTicketIds = ["deployment-banner", "telemetry-toggle", "cache-summary"];
+  game.unlockedSessions = 3;
+  await page.addInitScript((savedGame) => {
+    localStorage.setItem("context-switch-emergency-save", JSON.stringify({ version: 6, savedAt: Date.now(), game: savedGame }));
+  }, game);
+
+  await page.goto("/");
+  const anthill = page.getByRole("textbox", { name: "Anthill Code command" });
+  await anthill.fill("pane split 2");
+  await anthill.press("Enter");
+  await expect(page.locator(".terminal-workspace.with-pane")).toBeVisible();
+  const forge = page.getByRole("textbox", { name: "OpenMind Forge command" });
+  await forge.fill("/status");
+  await forge.press("Enter");
+  await expect(page.locator(".secondary-pane")).toContainText("SESSION CONFIGURATION");
+  await page.setViewportSize({ width: 568, height: 320 });
+  const secondaryPromptBottom = await forge.evaluate((element) => element.getBoundingClientRect().bottom);
+  expect(secondaryPromptBottom).toBeLessThanOrEqual(320);
+  await anthill.fill("pane close");
+  await anthill.press("Enter");
+  await expect(page.locator(".secondary-pane")).toHaveCount(0);
+});
+
+test("same-provider tabs retain their own session status and event stream", async ({ page }) => {
+  const game = createInitialState();
+  game.completedTicketIds = ["deployment-banner", "telemetry-toggle"];
+  game.unlockedSessions = 2;
+  await page.addInitScript((savedGame) => {
+    localStorage.setItem("context-switch-emergency-save", JSON.stringify({ version: 6, savedAt: Date.now(), game: savedGame }));
+  }, game);
+  await page.goto("/");
+
+  const first = page.getByRole("textbox", { name: "Anthill Code command" });
+  await first.fill("work on PERF-204");
+  await first.press("Enter");
+  await first.fill("tab new anthill second");
+  await first.press("Enter");
+  const second = page.getByRole("textbox", { name: "Anthill Code command" });
+  await second.fill("work on PLAT-77");
+  await second.press("Enter");
+  await expect(page.locator(".terminal-output .line-event")).toContainText("PLAT-77 → Ballad");
+  await second.fill("/status");
+  await second.press("Enter");
+  await expect(page.getByText(/current task\s+PLAT-77/)).toBeVisible();
+  await page.getByRole("tab", { name: /Anthill Code/ }).click();
+  await expect(page.locator(".terminal-output .line-event").filter({ hasText: "PLAT-77 → Ballad" })).toHaveCount(0);
+  await first.fill("/status");
+  await first.press("Enter");
+  await expect(page.getByText(/current task\s+PERF-204/)).toBeVisible();
+});
+
+test("importing a fresh save closes monitors that are no longer unlocked", async ({ page }) => {
+  const advanced = createInitialState();
+  advanced.completedTicketIds = ["deployment-banner", "telemetry-toggle", "cache-summary"];
+  advanced.unlockedSessions = 3;
+  await page.addInitScript((savedGame) => {
+    localStorage.setItem("context-switch-emergency-save", JSON.stringify({ version: 6, savedAt: Date.now(), game: savedGame }));
+  }, advanced);
+  await page.goto("/");
+  const command = page.getByRole("textbox", { name: "Anthill Code command" });
+  await command.fill("watch events");
+  await command.press("Enter");
+  await expect(page.getByRole("tab", { name: /watch.events/ })).toBeVisible();
+  await page.getByRole("tab", { name: /Anthill Code/ }).click();
+  page.on("dialog", (dialog) => void dialog.accept());
+  const chooserPromise = page.waitForEvent("filechooser");
+  await command.fill("save import");
+  await command.press("Enter");
+  const chooser = await chooserPromise;
+  await chooser.setFiles({ name: "fresh.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ version: 6, savedAt: Date.now(), game: createInitialState() })) });
+  await expect(page.getByRole("tab", { name: /watch.events/ })).toHaveCount(0);
+  await expect(page.locator(".terminal-contextbar")).toContainText("0 shipped");
+});
+
+test("tab capacity reports an error without discarding existing history", async ({ page }) => {
+  const game = createInitialState();
+  game.completedTicketIds = ["deployment-banner"];
+  game.unlockedSessions = 2;
+  await page.addInitScript((savedGame) => {
+    localStorage.setItem("context-switch-emergency-save", JSON.stringify({ version: 6, savedAt: Date.now(), game: savedGame }));
+  }, game);
+  await page.goto("/");
+  const command = page.getByRole("textbox", { name: "Anthill Code command" });
+  await command.fill("tickets list");
+  await command.press("Enter");
+  for (let index = 0; index < 7; index += 1) {
+    await command.fill(`tab new anthill extra-${index}`);
+    await command.press("Enter");
+  }
+  await expect(page.getByRole("tab")).toHaveCount(8);
+  await expect(page.getByText(/eight tabs are open/)).toBeVisible();
+  await page.getByRole("tab", { name: /Anthill Code/ }).click();
+  await expect(page.locator(".terminal-output .line-output pre").filter({ hasText: "APP-118" }).first()).toBeVisible();
+});

@@ -15,6 +15,7 @@ describe("operator CLI", () => {
     const result = evaluateCommand("reviews read APP-118", state);
 
     expect(result.messages[0].text).toContain("review risk score 34/100");
+    expect(result.messages[0].text).toContain("risk source");
     expect(result.messages[0].text).toContain("no migration fixture was added");
     expect(result.messages[0].text).toContain("approve will ship the warning as a known defect");
     expect(result.messages[0].text).toContain("resolve finding; another agent pass");
@@ -30,7 +31,7 @@ describe("operator CLI", () => {
 
     const result = evaluateCommand("reviews read SHIP-1", state);
 
-    expect(result.messages[0].text).toContain("privacy exposed · cache clean");
+    expect(result.messages[0].text).toContain("privacy open · cache clean");
     expect(result.messages[0].text).toContain("runtime clean · exports racy");
     expect(result.messages[0].text).toContain("health 82 · debt 4 · trust 30");
   });
@@ -50,6 +51,7 @@ describe("operator CLI", () => {
       ticketId: "deployment-banner",
       modelId: "couplet",
       improveBrief: true,
+      reasoning: "medium",
     });
   });
 
@@ -58,6 +60,13 @@ describe("operator CLI", () => {
     const forge = { providerId: "openmind", modelId: "spark", permissionMode: "workspace-write" as const, reasoning: "medium" as const };
     expect(evaluateCommand("/model spark", state, forge).effect).toEqual({ type: "model", modelId: "spark" });
     expect(evaluateCommand("/model ballad", state, forge).messages[0].kind).toBe("error");
+  });
+
+  it("uses Forge reasoning and plan permission in ticket assignments", () => {
+    const result = evaluateCommand("work on APP-101", createInitialState(), {
+      providerId: "openmind", modelId: "spark", permissionMode: "plan", reasoning: "high",
+    });
+    expect(result.effect).toMatchObject({ type: "assign", improveBrief: true, reasoning: "high" });
   });
 
   it("accepts natural-language work prompts in each provider session", () => {
@@ -69,6 +78,7 @@ describe("operator CLI", () => {
       ticketId: "deployment-banner",
       modelId: "spark",
       improveBrief: false,
+      reasoning: "medium",
     });
   });
 
@@ -127,6 +137,11 @@ describe("operator CLI", () => {
     state.reviews.push({ id: "review-1", ticketId: "deployment-banner", sessionId: 0, risk: 0.12, createdAt: 4 });
     expect(commandSuggestions("anthill", state)).toContain("reviews read APP-101");
     expect(commandSuggestions("anthill", state)).not.toContain("work on APP-101");
+    expect(commandSuggestions("anthill", state)).not.toContain("reviews approve APP-101");
+    state.sessions[1] = { ...state.sessions[1], status: "awaiting-review", ticketId: "cache-summary", modelId: "spark", progress: 1 };
+    state.reviews.push({ id: "review-2", ticketId: "cache-summary", sessionId: 1, risk: 0.4, createdAt: 4 });
+    expect(commandSuggestions("openmind", state)).toContain("reviews read PERF-204");
+    expect(commandSuggestions("openmind", state)).not.toContain("reviews read APP-101");
   });
 
   it("unlocks multiplexer abilities through progression", () => {

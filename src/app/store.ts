@@ -19,13 +19,13 @@ interface GameStore {
   reconcile: (now: number) => void;
   persist: () => Promise<void>;
   setSpeed: (speed: Speed) => void;
-  assign: (sessionId: number, ticketId: string, modelId: string, improveBrief: boolean) => string | null;
+  assign: (sessionId: number, ticketId: string, modelId: string, improveBrief: boolean, reasoning?: "low" | "medium" | "high") => string | null;
   review: (reviewId: string, decision: ReviewDecision) => string | null;
   compact: (sessionId: number) => string | null;
   purchase: (upgradeId: string) => string | null;
   dismissNotice: () => void;
   exportSave: () => string;
-  importSave: (serialised: string) => Promise<void>;
+  importSave: (serialised: string) => Promise<boolean>;
   restart: () => Promise<void>;
 }
 
@@ -73,7 +73,7 @@ export const useGameStore = create<GameStore>((set, get) => {
     pulse: (now) => {
       const store = get();
       if (!store.hydrated || document.hidden) return;
-      const elapsed = Math.min(1, Math.max(0, (now - store.lastWallClock) / 1000));
+      const elapsed = Math.min(BALANCE.offlineCapSeconds, Math.max(0, (now - store.lastWallClock) / 1000));
       set({ game: advanceGame(store.game, elapsed * store.speed), lastWallClock: now });
     },
     reconcile: (now) => {
@@ -85,7 +85,7 @@ export const useGameStore = create<GameStore>((set, get) => {
     },
     persist: async () => saveGame(get().game),
     setSpeed: (speed) => set({ speed }),
-    assign: (sessionId, ticketId, modelId, improveBrief) => commit((state) => startTicket(state, sessionId, ticketId, modelId, improveBrief)),
+    assign: (sessionId, ticketId, modelId, improveBrief, reasoning) => commit((state) => startTicket(state, sessionId, ticketId, modelId, improveBrief, reasoning)),
     review: (reviewId, decision) => commit((state) => reviewTicket(state, reviewId, decision)),
     compact: (sessionId) => commit((state) => compactSession(state, sessionId)),
     purchase: (upgradeId) => commit((state) => buyUpgrade(state, upgradeId)),
@@ -96,8 +96,10 @@ export const useGameStore = create<GameStore>((set, get) => {
         const envelope = parseSave(serialised);
         set({ game: envelope.game, lastWallClock: Date.now(), notice: "Save imported." });
         await saveGame(envelope.game);
+        return true;
       } catch (error) {
         set({ notice: messageFrom(error) });
+        return false;
       }
     },
     restart: async () => {

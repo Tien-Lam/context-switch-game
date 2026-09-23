@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { advanceGame, compactSession, GameRuleError, reviewTicket, startTicket } from "../src/game/engine";
 import { BALANCE } from "../src/game/balance";
 import { createInitialState } from "../src/game/initialState";
-import { availableModels, availableTickets } from "../src/game/selectors";
+import { availableModels, availableTickets, incidentIsOpen, isReviewBlocked, visibleTickets } from "../src/game/selectors";
 import { content } from "../src/content";
 
 describe("agent simulation", () => {
@@ -203,5 +203,117 @@ describe("agent simulation", () => {
       "quota-display",
       "webhook-backoff",
     ]));
+  });
+
+  it("opens a repair ticket after a rushed review and lets it prevent the later incident", () => {
+    let state = createInitialState();
+    state.completedTicketIds = ["deployment-banner", "cache-summary", "parallel-reports", "quota-display"];
+    state.unlockedSessions = 3;
+    state.flags.cacheShortcut = true;
+
+    expect(availableTickets(state).map((ticket) => ticket.id)).toContain("cache-repair");
+    expect(visibleTickets(state).map((ticket) => ticket.id)).not.toContain("telemetry-repair");
+
+    state = startTicket(state, 0, "cache-repair", "ballad");
+    state = advanceGame(state, 7);
+    state = reviewTicket(state, state.reviews[0].id, "approve");
+
+    expect(incidentIsOpen(state, "cache-shortcut")).toBe(false);
+    expect(state.completedTicketIds).toContain("cache-repair");
+    expect(state.events.some((event) => event.title.includes("resolved the incident"))).toBe(true);
+    expect(state.events.some((event) => event.title.includes("SEV-2"))).toBe(false);
+    expect(state.events.some((event) => event.title === "Pre-demo freshness audit passed")).toBe(true);
+  });
+
+  it("keeps a failed repair and the freshness audit unresolved", () => {
+    let state = createInitialState();
+    state.completedTicketIds = ["deployment-banner", "cache-summary", "webhook-backoff", "telemetry-toggle", "quota-display"];
+    state.unlockedSessions = 3;
+    state.flags.cacheShortcut = true;
+    expect(availableTickets(state).map((ticket) => ticket.id)).not.toContain("stale-customer-data");
+
+    state = startTicket(state, 0, "cache-repair", "spark");
+    state = advanceGame(state, 6);
+    state = structuredClone(state);
+    state.reviews[0].risk = 0.74;
+    state = reviewTicket(state, state.reviews[0].id, "approve");
+
+    expect(state.completedTicketIds).not.toContain("cache-repair");
+    expect(incidentIsOpen(state, "cache-shortcut")).toBe(true);
+    expect(availableTickets(state).map((ticket) => ticket.id)).toContain("cache-repair");
+    expect(availableTickets(state).map((ticket) => ticket.id)).not.toContain("stale-customer-data");
+  });
+
+  it("changes the Anthill plan once after the second shipment to motivate provider switching", () => {
+    let state = createInitialState();
+    state = startTicket(state, 0, "deployment-banner", "ballad");
+    state = advanceGame(state, 5);
+    state = reviewTicket(state, state.reviews[0].id, "approve");
+    state = startTicket(state, 0, "telemetry-toggle", "ballad");
+    state = advanceGame(state, 8);
+    const before = state.providerQuota.anthill;
+    const otherProvider = state.providerQuota.openmind;
+    state = reviewTicket(state, state.reviews[0].id, "escalate");
+
+    expect(state.providerQuota.anthill).toBeCloseTo(Math.max(0, before - 14));
+    expect(state.providerQuota.openmind).toBe(otherProvider);
+    expect(state.events.filter((event) => event.title === "Anthill changed the team plan")).toHaveLength(1);
+  });
+
+  it("never replays a consequence when its old activity entry is trimmed", () => {
+    let state = createInitialState();
+    state.completedTicketIds = ["deployment-banner", "telemetry-toggle"];
+    state.unlockedSessions = 2;
+    state.flags.privacyDefaultedOn = true;
+    state = startTicket(state, 0, "quota-display", "couplet");
+    state = advanceGame(state, 6);
+    state = reviewTicket(state, state.reviews[0].id, "approve");
+    expect(state.flags.privacyConsequenceApplied).toBe(true);
+
+    state = structuredClone(state);
+    state.events = [];
+    state = startTicket(state, 0, "cache-summary", "ballad");
+    state = advanceGame(state, 9);
+    const trustBefore = state.trust;
+    state = reviewTicket(state, state.reviews[0].id, "escalate");
+
+    expect(state.trust).toBe(trustBefore - BALANCE.escalationTrustCost);
+    expect(state.events.some((event) => event.title === "Enterprise disabled telemetry")).toBe(false);
+  });
+
+  it("uses the displayed risk score to block a high-risk finale review", () => {
+    const state = createInitialState();
+    state.sessions[0] = { ...state.sessions[0], status: "awaiting-review", ticketId: "investor-demo", modelId: "spark", progress: 1 };
+    const review = { id: "final-high-risk", ticketId: "investor-demo", sessionId: 0, risk: 0.72, createdAt: 1 };
+    state.reviews.push(review);
+
+    expect(isReviewBlocked(state, review)).toBe(true);
+    expect(reviewTicket(state, review.id, "approve").stats.defects).toBe(1);
+  });
+
+  it("makes high reasoning spend quota to reduce review risk", () => {
+    let state = createInitialState();
+    state.completedTicketIds.push("deployment-banner");
+    state.unlockedSessions = 2;
+    const normal = advanceGame(startTicket(state, 0, "cache-summary", "spark", false, "medium"), 8);
+    const high = advanceGame(startTicket(state, 0, "cache-summary", "spark", false, "high"), 8);
+
+    expect(high.providerQuota.openmind).toBeCloseTo(normal.providerQuota.openmind - 4);
+    expect(high.reviews[0].risk).toBeCloseTo(normal.reviews[0].risk - 0.09);
+  });
+
+  it("charges idle waiting to final throughput", () => {
+    const finish = (idleSeconds: number) => {
+      let state = createInitialState();
+      state.completedTicketIds = content.tickets.filter((ticket) => !ticket.incidentFor && ticket.kind !== "finale").map((ticket) => ticket.id);
+      state.unlockedSessions = 3;
+      state = advanceGame(state, idleSeconds);
+      state = startTicket(state, 0, "investor-demo", "ballad");
+      state = advanceGame(state, 13);
+      state = reviewTicket(state, state.reviews[0].id, "approve");
+      return state.ending!.scores.throughput;
+    };
+
+    expect(finish(90)).toBeLessThan(finish(0));
   });
 });

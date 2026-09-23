@@ -15,7 +15,7 @@ export const providers: ProviderDefinition[] = [
     id: "openmind",
     name: "OpenMind Forge",
     shortName: "OMF",
-    description: "Isolated workspaces, adjustable confidence, and an enthusiasm for doing all of it at once.",
+    description: "Parallel tool use, adjustable reasoning, and an enthusiasm for doing all of it at once. Shared branches still need isolation.",
     color: "#72d7c3",
     maxQuota: 55,
     regenPerSecond: 0.9,

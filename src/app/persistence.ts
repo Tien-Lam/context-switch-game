@@ -3,7 +3,7 @@ import { z } from "zod";
 import { content, modelById, ticketById, upgradeById } from "../content";
 import type { GameState } from "../game/types";
 
-export const SAVE_VERSION = 4;
+export const SAVE_VERSION = 6;
 const SAVE_ID = "active";
 const EMERGENCY_KEY = "context-switch-emergency-save";
 
@@ -18,6 +18,7 @@ interface SaveRecord extends SaveEnvelope {
 }
 
 let database: (Dexie & { saves: EntityTable<SaveRecord, "id"> }) | null = null;
+let saveQueue: Promise<void> = Promise.resolve();
 
 const finiteNumber = z.number().finite();
 const boundedPercent = finiteNumber.min(0).max(100);
@@ -31,6 +32,7 @@ const SessionSchema = z.object({
   briefImproved: z.boolean(),
   reviewRound: z.number().int().nonnegative(),
   workedInParallel: z.boolean().default(false),
+  reasoning: z.enum(["low", "medium", "high"]),
 });
 const ReviewSchema = z.object({
   id: z.string().min(1),
@@ -43,6 +45,7 @@ const EventSchema = z.object({
   id: z.string().min(1),
   at: finiteNumber.nonnegative(),
   providerId: z.string().optional(),
+  sessionId: z.number().int().nonnegative().optional(),
   tone: z.enum(["info", "good", "warning", "bad"]),
   title: z.string(),
   message: z.string(),
@@ -77,6 +80,9 @@ const GameStateSchema = z.object({
     runtimeDriftAccepted: z.boolean(),
     raceAccepted: z.boolean(),
     incidentAnnounced: z.boolean(),
+    privacyConsequenceApplied: z.boolean(),
+    runtimeConsequenceApplied: z.boolean(),
+    raceConsequenceApplied: z.boolean(),
   }),
   stats: z.object({
     shipped: finiteNumber.nonnegative(),
@@ -125,11 +131,18 @@ function validateReferences(game: GameState) {
     }
   }
   const reviewIds = new Set<string>();
+  const reviewSessions = new Set<number>();
   for (const review of game.reviews) {
-    if (reviewIds.has(review.id) || !ticketById.has(review.ticketId) || !sessionIds.has(review.sessionId)) {
+    const session = game.sessions[review.sessionId];
+    if (reviewIds.has(review.id) || reviewSessions.has(review.sessionId) || !ticketById.has(review.ticketId)
+      || !session || session.status !== "awaiting-review" || session.ticketId !== review.ticketId) {
       throw new Error("Invalid review queue.");
     }
     reviewIds.add(review.id);
+    reviewSessions.add(review.sessionId);
+  }
+  if (game.sessions.some((session) => session.status === "awaiting-review" && !reviewSessions.has(session.id))) {
+    throw new Error("Missing review for awaiting session.");
   }
 }
 
@@ -200,6 +213,39 @@ function migrateEnvelope(value: unknown): SaveEnvelope {
     }
     version = 4;
   }
+  if (version === 4) {
+    if (game && typeof game === "object") {
+      const previous = game as Record<string, unknown>;
+      const flags = previous.flags && typeof previous.flags === "object"
+        ? previous.flags as Record<string, unknown>
+        : {};
+      const complete = Array.isArray(previous.completedTicketIds) ? previous.completedTicketIds : [];
+      game = {
+        ...previous,
+        flags: {
+          ...flags,
+          privacyConsequenceApplied: flags.privacyConsequenceApplied === true || (flags.privacyDefaultedOn === true && complete.includes("quota-display")),
+          runtimeConsequenceApplied: flags.runtimeConsequenceApplied === true || (flags.runtimeDriftAccepted === true && complete.includes("parallel-reports")),
+          raceConsequenceApplied: flags.raceConsequenceApplied === true || (flags.raceAccepted === true && complete.includes("stale-customer-data")),
+        },
+      };
+    }
+    version = 5;
+  }
+  if (version === 5) {
+    if (game && typeof game === "object") {
+      const previous = game as Record<string, unknown>;
+      if (Array.isArray(previous.sessions)) {
+        game = {
+          ...previous,
+          sessions: previous.sessions.map((value) => value && typeof value === "object"
+            ? { ...(value as Record<string, unknown>), reasoning: "medium" }
+            : value),
+        };
+      }
+    }
+    version = 6;
+  }
   if (version !== SAVE_VERSION || typeof candidate.savedAt !== "number" || !Number.isFinite(candidate.savedAt)) {
     throw new Error("Invalid save envelope.");
   }
@@ -221,32 +267,44 @@ export function serialiseSave(game: GameState, savedAt: number): string {
   return JSON.stringify({ version: SAVE_VERSION, savedAt, game } satisfies SaveEnvelope, null, 2);
 }
 
-export async function saveGame(game: GameState, savedAt = Date.now()) {
+export function saveGame(game: GameState, savedAt = Date.now()) {
   const envelope: SaveRecord = { id: SAVE_ID, version: SAVE_VERSION, savedAt, game };
   try {
-    await getDatabase().saves.put(envelope);
-  } finally {
+    // Keep the latest snapshot available even if the tab closes before IndexedDB finishes.
     localStorage.setItem(EMERGENCY_KEY, serialiseSave(game, savedAt));
+  } catch {
+    // IndexedDB remains the second persistence path.
   }
+  const operation = saveQueue.then(async () => { await getDatabase().saves.put(envelope); });
+  saveQueue = operation.catch(() => {});
+  return operation;
 }
 
 export async function loadGame(): Promise<SaveEnvelope | null> {
+  let databaseSave: SaveEnvelope | null = null;
   try {
     const record = await getDatabase().saves.get(SAVE_ID);
-    if (record) return migrateEnvelope(record);
+    if (record) databaseSave = migrateEnvelope(record);
   } catch {
     // The local-storage snapshot is intentionally the recovery path.
   }
   const emergency = localStorage.getItem(EMERGENCY_KEY);
-  if (!emergency) return null;
+  if (!emergency) return databaseSave;
   try {
-    return parseSave(emergency);
+    return newestSave(databaseSave, parseSave(emergency));
   } catch {
-    return null;
+    return databaseSave;
   }
 }
 
+export function newestSave(first: SaveEnvelope | null, second: SaveEnvelope | null): SaveEnvelope | null {
+  if (!first) return second;
+  if (!second) return first;
+  return second.savedAt > first.savedAt ? second : first;
+}
+
 export async function clearSave() {
+  await saveQueue;
   try {
     await getDatabase().saves.delete(SAVE_ID);
   } finally {
