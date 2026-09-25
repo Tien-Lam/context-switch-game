@@ -1,8 +1,8 @@
 import { produce } from "immer";
 import { content, modelById, providerById, ticketById, upgradeById } from "../content";
 import { BALANCE } from "./balance";
-import { availableTickets, incidentIsOpen, isModelUnlocked, isReviewBlocked } from "./selectors";
-import type { EndingState, GameEvent, GameState, ReviewDecision, SessionState } from "./types";
+import { availableTickets, incidentIsOpen, isModelUnlocked, isReviewBlocked, reviewRiskFactorList } from "./selectors";
+import type { EndingState, GameEvent, GameState, IncidentMitigation, ReviewDecision, SessionState } from "./types";
 
 export class GameRuleError extends Error {}
 
@@ -22,7 +22,7 @@ function quotaMax(state: GameState, providerId: string) {
 function addEvent(state: GameState, event: Omit<GameEvent, "id" | "at">) {
   state.events.unshift({
     ...event,
-    id: `${Math.round(state.gameTime * 1000)}-${state.events.length}-${event.title}`,
+    id: `${Math.round((state.gameTime + 1e-9) * 1000)}-${state.events.length}-${event.title}`,
     at: state.gameTime,
   });
   state.events.splice(BALANCE.maxEvents);
@@ -50,38 +50,53 @@ function calculateReviewRisk(state: GameState, session: SessionState) {
   const briefingBonus = session.briefImproved ? 0.13 : 0;
   const playbookBonus = hasUpgrade(state, "repo-playbook") ? 0.07 : 0;
   const testBonus = hasUpgrade(state, "fast-checks") ? 0.08 : 0;
+  const integrityBonus = hasUpgrade(state, "ci-integrity-guard") ? 0.05 : 0;
   const revisionBonus = session.reviewRound * 0.18;
   const healthPenalty = Math.max(0, 70 - state.repoHealth) / 220;
 
   return clamp(
     ticket.baseRisk + model.riskModifier + reasoningModifier + contextPenalty + parallelPenalty + healthPenalty
-      - briefingBonus - playbookBonus - testBonus - revisionBonus,
+      - briefingBonus - playbookBonus - testBonus - integrityBonus - revisionBonus,
     0.02,
     0.92,
   );
 }
 
-function computeEnding(state: GameState): EndingState {
+export function computeEnding(state: GameState): EndingState {
   const reliability = clamp(Math.round(state.repoHealth - state.stats.defects * 7), 0, 100);
-  const elapsedTimePenalty = Math.max(0, (state.gameTime - 75) / 5);
   const mainTicketsShipped = state.completedTicketIds.filter((id) => !ticketById.get(id)?.incidentFor).length;
-  const throughput = clamp(Math.round(50 + mainTicketsShipped * 6 - state.stats.revisions * 4 - state.stats.escalations * 5 - elapsedTimePenalty), 0, 100);
+  const elapsedTimePenalty = Math.max(0, (state.gameTime - 180) / 60);
+  const throughput = clamp(Math.round(
+    mainTicketsShipped * 5 - state.stats.revisions * 1.5 - state.stats.escalations * 2.5
+      - state.stats.defects * 5 - elapsedTimePenalty,
+  ), 0, 100);
   const trust = clamp(Math.round(state.trust), 0, 100);
   const debt = clamp(Math.round(state.debt), 0, 100);
   const disciplined = reliability >= 78 && debt <= 20 && state.stats.defects <= 1;
   const title = disciplined
-    ? "The demo works. Suspiciously well."
+    ? "The release works. Suspiciously well."
     : state.stats.defects >= 3
-      ? "The demo works. Legal has follow-up questions."
-      : "The demo works, provided nobody refreshes twice.";
+      ? "The release works. Legal has follow-up questions."
+      : "The release works, provided nobody refreshes twice.";
   const consequences = [
     incidentIsOpen(state, "cache-shortcut") ? "the dashboard cache still served stale data" : state.flags.cacheShortcut ? "the cache shortcut was repaired" : "the cache audit stayed clean",
     incidentIsOpen(state, "privacy-default") ? "telemetry still had the wrong default" : state.flags.privacyDefaultedOn ? "the privacy default was repaired" : "the privacy default held",
     incidentIsOpen(state, "runtime-drift") ? "the legacy worker survived the audit" : state.flags.runtimeDriftAccepted ? "the legacy worker was removed" : "the runtime started cleanly",
     incidentIsOpen(state, "merge-race") ? "the report race reached production" : state.flags.raceAccepted ? "the export race was repaired" : "parallel exports remained isolated",
+    incidentIsOpen(state, "test-integrity") ? "the green build hid a checkout defect" : state.flags.testIntegrityAccepted ? "checkout coverage was restored" : "the green build kept its assertions",
+    incidentIsOpen(state, "contract-mismatch") ? "the two agents shipped incompatible branches" : state.flags.contractMismatchAccepted ? "the contract was repaired" : "both rollout orders passed",
+    incidentIsOpen(state, "request-loop") ? "the request loop remains live" : state.flags.requestLoopAccepted
+      ? `the retry loop was repaired ${state.incidentMitigation === "rollback" ? "after rolling back the feature" : state.incidentMitigation === "rate-limit" ? "after rate-limiting traffic" : state.incidentMitigation === "scale" ? "after scaling the gateway" : "before the gateway rollout"}`
+      : "the gateway stayed healthy",
   ];
-  const message = `Your review history followed you into the room: ${consequences.join(", ")}.`;
-  return { title, message, scores: { throughput, reliability, trust, debt } };
+  const message = `Your review history followed the release into production: ${consequences.join(", ")}.`;
+  const scoreDetails = {
+    throughput: `${mainTicketsShipped} main tickets × 5 − ${state.stats.revisions} revisions × 1.5 − ${state.stats.escalations} escalations × 2.5 − ${state.stats.defects} escaped defects × 5 − ${Math.round(elapsedTimePenalty * 10) / 10} elapsed-time points (after a 180-second grace period; includes idle time and quota restocks).`,
+    reliability: `${Math.round(state.repoHealth)} repository health − ${state.stats.defects} escaped defects × 7.`,
+    trust: "Current team trust after delivery, review, and incident decisions.",
+    debt: "Current unresolved engineering debt after repairs.",
+  };
+  return { title, message, scores: { throughput, reliability, trust, debt }, scoreDetails };
 }
 
 function unlockProgression(state: GameState) {
@@ -111,6 +126,14 @@ function unlockProgression(state: GameState) {
       tone: "warning",
       title: "Anthill changed the team plan",
       message: "A fictional provider policy update removed 14 Anthill quota. OpenMind's pool is independent; use its tab for the next ticket or wait for regeneration.",
+    });
+  }
+  if (state.completedTicketIds.includes("investor-demo") && !state.completedTicketIds.includes("green-build")
+    && state.completedTicketIds.at(-1) === "investor-demo") {
+    addEvent(state, {
+      tone: "info",
+      title: "The demo became a product",
+      message: "Chapter two is open. QA-401 is already waiting; run `tickets read QA-401` from either provider terminal.",
     });
   }
 }
@@ -145,6 +168,16 @@ function announceIncidentIfReady(state: GameState) {
 }
 
 function announceConsequences(state: GameState) {
+  if (incidentIsOpen(state, "test-integrity") && ["account-api", "account-panel"].every((id) => state.completedTicketIds.includes(id)) && !state.flags.testConsequenceApplied) {
+    state.flags.testConsequenceApplied = true;
+    state.trust = clamp(state.trust - 8, 0, 100);
+    state.debt = clamp(state.debt + 3, 0, 100);
+    addEvent(state, {
+      tone: "warning",
+      title: "Invoice totals drifted by one cent",
+      message: "The deleted checkout assertion from QA-401 hid a rounding defect. Customer invoices are affected; FIX-401 is still open.",
+    });
+  }
   if (incidentIsOpen(state, "privacy-default") && state.completedTicketIds.includes("quota-display") && !state.flags.privacyConsequenceApplied) {
     state.flags.privacyConsequenceApplied = true;
     state.trust = clamp(state.trust - 12, 0, 100);
@@ -175,6 +208,35 @@ function announceConsequences(state: GameState) {
       title: "Two reports became one",
       message: "The shared export path from DATA-312 overwrote a customer's report during the demo rehearsal. −12 trust, −4 health.",
     });
+  }
+  if (["account-api", "account-panel"].every((id) => state.completedTicketIds.includes(id)) && !state.flags.contractAuditAnnounced) {
+    state.flags.contractAuditAnnounced = true;
+    if (incidentIsOpen(state, "contract-mismatch")) {
+      state.trust = clamp(state.trust - 6, 0, 100);
+      state.debt = clamp(state.debt + 4, 0, 100);
+      addEvent(state, {
+        tone: "warning",
+        title: "Cross-branch contract failed",
+        message: "Each agent's own tests passed, but an old server/new panel combination failed. FIX-420 must reconcile the branches before INT-422 can ship.",
+      });
+    } else {
+      addEvent(state, { tone: "good", title: "Cross-branch contract passed", message: "Both deployment orders work. INT-422 is ready to join the branches." });
+    }
+  }
+  if (["helpful-retry", "gateway-rollout"].every((id) => state.completedTicketIds.includes(id)) && !state.flags.retryAuditAnnounced) {
+    state.flags.retryAuditAnnounced = true;
+    if (incidentIsOpen(state, "request-loop")) {
+      state.incidentResponse = "active";
+      state.trust = clamp(state.trust - 10, 0, 100);
+      state.repoHealth = clamp(state.repoHealth - 5, 0, 100);
+      addEvent(state, {
+        tone: "bad",
+        title: "SEV-1 · The helpful retry",
+        message: "The shell is sending repeated account requests while the gateway rolls. Run `incident status`, then contain the load before FIX-502 can start.",
+      });
+    } else {
+      addEvent(state, { tone: "good", title: "Gateway canary stayed healthy", message: "The shell kept request volume bounded through the gateway rollout. SHIP-2 is ready." });
+    }
   }
 }
 
@@ -212,6 +274,9 @@ function completeTicket(state: GameState, session: SessionState, defect: boolean
     if (ticket.riskFlag === "privacy-default") state.flags.privacyDefaultedOn = true;
     if (ticket.riskFlag === "runtime-drift") state.flags.runtimeDriftAccepted = true;
     if (ticket.riskFlag === "merge-race") state.flags.raceAccepted = true;
+    if (ticket.riskFlag === "test-integrity") state.flags.testIntegrityAccepted = true;
+    if (ticket.riskFlag === "contract-mismatch") state.flags.contractMismatchAccepted = true;
+    if (ticket.riskFlag === "request-loop") state.flags.requestLoopAccepted = true;
   }
 
   addEvent(state, {
@@ -226,6 +291,7 @@ function completeTicket(state: GameState, session: SessionState, defect: boolean
         : "Senior review secured the delivery, but the interruption earned no delivery trust.",
   });
   if (repairingIncident) {
+    if (ticket.incidentFor === "request-loop" && state.incidentResponse !== "none") state.incidentResponse = "resolved";
     state.repoHealth = clamp(state.repoHealth + 6, 0, 100);
     state.debt = clamp(state.debt - 7, 0, 100);
     addEvent(state, {
@@ -237,12 +303,24 @@ function completeTicket(state: GameState, session: SessionState, defect: boolean
     });
   }
   if (defect && ticket.riskFlag !== "none") {
+    const repair = content.tickets.find((candidate) => candidate.incidentFor === ticket.riskFlag);
+    const missingPrerequisites = repair?.prerequisites.filter((id) => !state.completedTicketIds.includes(id)) ?? [];
+    const blockedIncident = repair?.blockedByIncident && incidentIsOpen(state, repair.blockedByIncident);
+    const repairMessage = !repair
+      ? "The review warning needs follow-up investigation."
+      : missingPrerequisites.length
+        ? `${repair.key} unlocks after ${missingPrerequisites.map((id) => ticketById.get(id)?.key ?? id).join(" and ")} ship.`
+        : blockedIncident
+          ? `${repair.key} unlocks after the active incident is contained.`
+          : availableTickets(state).some((candidate) => candidate.id === repair.id)
+            ? `${repair.key} is ready in the backlog.`
+            : `${repair.key} unlocks after its remaining prerequisite is complete.`;
     addEvent(state, {
       providerId,
       sessionId: session.id,
       tone: "bad",
       title: `${ticket.key} opened follow-up work`,
-      message: `A customer-visible risk escaped review. ${content.tickets.find((candidate) => candidate.incidentFor === ticket.riskFlag)?.key ?? "A repair ticket"} is now ready in the backlog.`,
+      message: `A review warning escaped and needs follow-up. ${repairMessage}`,
     });
   }
   resetSession(session);
@@ -250,6 +328,40 @@ function completeTicket(state: GameState, session: SessionState, defect: boolean
   announceConsequences(state);
   announceIncidentIfReady(state);
   if (ticket.kind === "finale") state.ending = computeEnding(state);
+}
+
+export function mitigateIncident(source: GameState, action: IncidentMitigation) {
+  if (!["active", "scaled", "rate-limited"].includes(source.incidentResponse)) {
+    throw new GameRuleError("No live gateway incident needs mitigation.");
+  }
+  if (action === "scale" && source.incidentResponse !== "active") {
+    throw new GameRuleError("Capacity was already tried; contain the request loop instead.");
+  }
+  if (action === "rate-limit" && source.incidentResponse === "rate-limited") {
+    throw new GameRuleError("The gateway is already rate-limited; start FIX-502 or roll back the retry feature.");
+  }
+  return produce(source, (state) => {
+    if (action === "scale") {
+      state.incidentResponse = "scaled";
+      state.incidentMitigation = action;
+      state.trust = clamp(state.trust - 6, 0, 100);
+      state.debt = clamp(state.debt + 4, 0, 100);
+      state.repoHealth = clamp(state.repoHealth + 8, 0, 100);
+      addEvent(state, { tone: "warning", title: "Gateway scaled; loop persists", message: "Extra capacity stabilized service and protected repository health, but the shell still creates requests. Choose `incident mitigate rate-limit` or `incident mitigate rollback`." });
+    } else if (action === "rate-limit") {
+      state.incidentResponse = "rate-limited";
+      state.incidentMitigation = action;
+      state.trust = clamp(state.trust - 2, 0, 100);
+      state.debt = clamp(state.debt + 3, 0, 100);
+      addEvent(state, { tone: "warning", title: "Gateway rate-limited", message: "Load is contained, but some account requests are delayed. FIX-502 can now repair the shell." });
+    } else {
+      state.incidentResponse = "rolled-back";
+      state.incidentMitigation = action;
+      state.trust = clamp(state.trust - 4, 0, 100);
+      state.debt = clamp(state.debt + 1, 0, 100);
+      addEvent(state, { tone: "good", title: "Retry feature rolled back", message: "Request volume returned to normal. The new retry feature is unavailable until FIX-502 repairs it." });
+    }
+  });
 }
 
 export function startTicket(
@@ -326,6 +438,7 @@ export function advanceGame(source: GameState, elapsedSeconds: number) {
             ticketId: ticket.id,
             sessionId: session.id,
             risk: calculateReviewRisk(state, session),
+            riskFactors: reviewRiskFactorList(state, ticket.id, session.id),
             createdAt: state.gameTime,
           });
           addEvent(state, {
@@ -432,6 +545,7 @@ export function advanceGame(source: GameState, elapsedSeconds: number) {
           ticketId: ticket.id,
           sessionId: session.id,
           risk: calculateReviewRisk(state, session),
+          riskFactors: reviewRiskFactorList(state, ticket.id, session.id),
           createdAt: state.gameTime,
         });
         addEvent(state, {
@@ -474,8 +588,9 @@ export function reviewTicket(source: GameState, reviewId: string, decision: Revi
     if (decision === "escalate") {
       state.stats.escalations += 1;
       state.trust = clamp(state.trust - BALANCE.escalationTrustCost, 0, 100);
+      state.repoHealth = clamp(state.repoHealth + 4, 0, 100);
       state.debt = clamp(state.debt - 2, 0, 100);
-      addEvent(state, { providerId: modelById.get(session.modelId ?? "")?.providerId, sessionId: session.id, tone: "good", title: `${ticket.key} escalated`, message: `A senior review corrected the risky path before shipping. The interruption cost ${BALANCE.escalationTrustCost} trust.` });
+      addEvent(state, { providerId: modelById.get(session.modelId ?? "")?.providerId, sessionId: session.id, tone: "good", title: `${ticket.key} escalated`, message: `A senior review added an independent check and strengthened repository health. It cost ${BALANCE.escalationTrustCost} trust and forfeited the delivery reward.` });
       completeTicket(state, session, false, false);
       return;
     }
@@ -506,6 +621,10 @@ export function buyUpgrade(source: GameState, upgradeId: string) {
   if (!upgrade) throw new GameRuleError("Unknown upgrade.");
   if (source.purchasedUpgradeIds.includes(upgradeId)) throw new GameRuleError("Upgrade already purchased.");
   if (source.completedTicketIds.length < upgrade.unlockAfter) throw new GameRuleError("Upgrade is not unlocked.");
+  if (upgrade.requiresTicketId && !source.completedTicketIds.includes(upgrade.requiresTicketId)) throw new GameRuleError(`Ship ${ticketById.get(upgrade.requiresTicketId)?.key ?? upgrade.requiresTicketId} to unlock this upgrade.`);
+  if (upgrade.requiresResolvedIncident && incidentIsOpen(source, upgrade.requiresResolvedIncident)) {
+    throw new GameRuleError(`Resolve ${content.tickets.find((ticket) => ticket.incidentFor === upgrade.requiresResolvedIncident)?.key ?? "the incident"} before buying this upgrade.`);
+  }
   if (source.trust < upgrade.cost) throw new GameRuleError("Not enough trust to win approval for that upgrade.");
 
   return produce(source, (state) => {

@@ -32,6 +32,6 @@ describe("vertical slice", () => {
     expect(state.completedTicketIds).toHaveLength(content.tickets.filter((ticket) => !ticket.incidentFor).length);
     expect(state.ending).not.toBeNull();
     expect(state.ending?.scores.reliability).toBeGreaterThan(60);
-    expect(state.gameTime).toBeLessThanOrEqual(220);
+    expect(state.gameTime).toBeLessThanOrEqual(400);
   });
 });

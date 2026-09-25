@@ -1,5 +1,7 @@
 export type SessionStatus = "idle" | "working" | "quota-paused" | "awaiting-review";
 export type ReviewDecision = "approve" | "revise" | "escalate";
+export type IncidentResponse = "none" | "active" | "scaled" | "rate-limited" | "rolled-back" | "resolved";
+export type IncidentMitigation = "scale" | "rate-limit" | "rollback";
 
 export interface SessionState {
   id: number;
@@ -19,6 +21,7 @@ export interface ReviewState {
   ticketId: string;
   sessionId: number;
   risk: number;
+  riskFactors?: string[];
   createdAt: number;
 }
 
@@ -50,6 +53,7 @@ export interface EndingState {
     trust: number;
     debt: number;
   };
+  scoreDetails?: Partial<Record<"throughput" | "reliability" | "trust" | "debt", string>>;
 }
 
 export interface GameState {
@@ -65,6 +69,8 @@ export interface GameState {
   completedTicketIds: string[];
   purchasedUpgradeIds: string[];
   reviews: ReviewState[];
+  incidentResponse: IncidentResponse;
+  incidentMitigation: "none" | IncidentMitigation;
   flags: {
     cacheShortcut: boolean;
     privacyDefaultedOn: boolean;
@@ -74,6 +80,12 @@ export interface GameState {
     privacyConsequenceApplied: boolean;
     runtimeConsequenceApplied: boolean;
     raceConsequenceApplied: boolean;
+    testIntegrityAccepted: boolean;
+    contractMismatchAccepted: boolean;
+    requestLoopAccepted: boolean;
+    contractAuditAnnounced: boolean;
+    retryAuditAnnounced: boolean;
+    testConsequenceApplied: boolean;
   };
   stats: GameStats;
   events: GameEvent[];

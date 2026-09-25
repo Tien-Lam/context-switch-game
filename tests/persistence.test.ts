@@ -94,6 +94,33 @@ describe("save envelope", () => {
     expect(parsed.game.sessions.every((session) => session.reasoning === "medium")).toBe(true);
   });
 
+  it("reopens completed demo saves for the next chapter", () => {
+    const prior = createInitialState();
+    prior.completedTicketIds = ["deployment-banner", "investor-demo"];
+    prior.ending = { title: "Demo complete", message: "Old ending", scores: { throughput: 80, reliability: 80, trust: 80, debt: 5 } };
+    const legacy = { ...prior, incidentResponse: undefined };
+    const parsed = parseSave(JSON.stringify({ version: 6, savedAt: 123456, game: legacy }));
+
+    expect(parsed.game.ending).toBeNull();
+    expect(parsed.game.incidentResponse).toBe("none");
+    expect(parsed.game.events[0].title).toBe("The demo became a product");
+  });
+
+  it("refreshes completed version-seven ending copy and score explanations", () => {
+    const prior = createInitialState();
+    prior.completedTicketIds = content.tickets.filter((ticket) => !ticket.incidentFor && ticket.kind !== "finale").map((ticket) => ticket.id);
+    prior.ending = { title: "Old ending", message: "repaired after resolved", scores: { throughput: 0, reliability: 60, trust: 50, debt: 10 } };
+    const { incidentMitigation, ...versionSeven } = prior;
+    void incidentMitigation;
+
+    const parsed = parseSave(JSON.stringify({ version: 7, savedAt: 123456, game: versionSeven }));
+
+    expect(parsed.game.ending?.message).not.toContain("repaired after resolved");
+    expect(parsed.game.ending?.scoreDetails?.throughput).toContain("includes idle time and quota restocks");
+    expect(parsed.game.ending?.scores.throughput).toBeGreaterThan(0);
+  });
+
+
   it("rejects unsupported data", () => {
     expect(() => parseSave('{"version":99}')).toThrow(/invalid/i);
   });

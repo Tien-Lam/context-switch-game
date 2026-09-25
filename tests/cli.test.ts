@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createInitialState } from "../src/game/initialState";
+import { advanceGame, buyUpgrade, startTicket } from "../src/game/engine";
 import { commandSuggestions, evaluateCommand } from "../src/ui/cli";
 
 describe("operator CLI", () => {
@@ -80,6 +81,75 @@ describe("operator CLI", () => {
       improveBrief: false,
       reasoning: "medium",
     });
+  });
+
+  it("suggests the next ready ticket instead of a shipped opening ticket", () => {
+    const state = createInitialState();
+    state.completedTicketIds = ["deployment-banner", "telemetry-toggle", "cache-summary", "runtime-upgrade", "webhook-backoff", "parallel-reports", "quota-display", "stale-customer-data", "investor-demo"];
+    const result = evaluateCommand("can you help me?", state);
+
+    expect(result.messages[0].text).toContain("next ready ticket is QA-401");
+    expect(result.messages[0].text).not.toContain("APP-101");
+  });
+
+  it("does not assign work when natural-language intent is negated", () => {
+    const state = createInitialState();
+    for (const prompt of ["don't work on APP-101", "don’t start APP-101", "do not implement APP-101", "never assign APP-101", "I do not want you to work on APP-101", "I do not want you working on APP-101", "Please avoid working on APP-101", "Do not do work on APP-101", "I would rather not work on APP-101", "Please hold off on APP-101", "Do not begin work on APP-101", "Please refrain from working on APP-101", "Delay work on APP-101", "Wait to start APP-101", "I cannot work on APP-101 yet", "I am not ready to start APP-101", "We should postpone work on APP-101"]) {
+      const result = evaluateCommand(prompt, state);
+      expect(result.effect).toBeUndefined();
+      expect(result.messages[0].text).toContain("No work started");
+    }
+    const ambiguous = evaluateCommand("APP-101 looks risky", state);
+    expect(ambiguous.effect).toBeUndefined();
+    expect(ambiguous.messages[0].text).toContain("No work started");
+  });
+
+  it("shows baseline and projected risk when listing tickets", () => {
+    const result = evaluateCommand("tickets list", createInitialState());
+    expect(result.messages[0].text).toContain("BASE/EST");
+    expect(result.messages[0].text).toContain("Risk is ticket baseline / estimate for the selected model");
+    expect(evaluateCommand("tickets read APP-101", createInitialState()).messages[0].text).toContain("% base ·");
+  });
+
+  it("projects ticket risk using the selected reasoning level and names its assumptions", () => {
+    const state = createInitialState();
+    const low = evaluateCommand("tickets read APP-101", state, { providerId: "openmind", modelId: "spark", reasoning: "low" }).messages[0].text;
+    const high = evaluateCommand("tickets read APP-101", state, { providerId: "openmind", modelId: "spark", reasoning: "high" }).messages[0].text;
+
+    expect(low).toContain("30-30% estimated with selected Spark and low reasoning");
+    expect(high).toContain("14-14% estimated with selected Spark and high reasoning");
+  });
+
+  it("includes purchased risk-reduction upgrades in review evidence", () => {
+    const state = createInitialState();
+    state.purchasedUpgradeIds.push("repo-playbook", "fast-checks");
+    const assigned = evaluateCommand("work on APP-101", state);
+    const effect = assigned.effect;
+    if (!effect || effect.type !== "assign") throw new Error("expected ticket assignment");
+    let running = startTicket(state, effect.sessionId, effect.ticketId, effect.modelId, effect.improveBrief, effect.reasoning);
+    running = advanceGame(running, 5);
+    const evidence = evaluateCommand("reviews read APP-101", running).messages[0].text;
+
+    expect(evidence).toContain("repository playbook −7");
+    expect(evidence).toContain("fast checks −8");
+  });
+
+  it("keeps review risk explanations fixed to the moment of scoring", () => {
+    const state = createInitialState();
+    state.completedTicketIds = ["deployment-banner", "telemetry-toggle"];
+    const assigned = evaluateCommand("work on PLAT-77", state);
+    const effect = assigned.effect;
+    if (!effect || effect.type !== "assign") throw new Error("expected ticket assignment");
+    let running = startTicket(state, effect.sessionId, effect.ticketId, "ballad");
+    running = advanceGame(running, 15);
+    const riskBefore = running.reviews[0].risk;
+    const before = evaluateCommand("reviews read PLAT-77", running).messages[0].text;
+    running = buyUpgrade(running, "fast-checks");
+    const after = evaluateCommand("reviews read PLAT-77", running).messages[0].text;
+
+    expect(before).not.toContain("fast checks −8");
+    expect(after).not.toContain("fast checks −8");
+    expect(after).toContain(`review risk score ${Math.round(riskBefore * 100)}/100`);
   });
 
   it("never starts work from natural-language review or inspection intent", () => {

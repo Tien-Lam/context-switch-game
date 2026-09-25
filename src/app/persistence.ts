@@ -1,9 +1,10 @@
 import Dexie, { type EntityTable } from "dexie";
 import { z } from "zod";
 import { content, modelById, ticketById, upgradeById } from "../content";
+import { computeEnding } from "../game/engine";
 import type { GameState } from "../game/types";
 
-export const SAVE_VERSION = 6;
+export const SAVE_VERSION = 8;
 const SAVE_ID = "active";
 const EMERGENCY_KEY = "context-switch-emergency-save";
 
@@ -39,6 +40,7 @@ const ReviewSchema = z.object({
   ticketId: z.string().min(1),
   sessionId: z.number().int().nonnegative(),
   risk: finiteNumber.min(0).max(1),
+  riskFactors: z.array(z.string()).optional(),
   createdAt: finiteNumber.nonnegative(),
 });
 const EventSchema = z.object({
@@ -60,6 +62,12 @@ const EndingSchema = z.object({
   title: z.string(),
   message: z.string(),
   scores: ScoresSchema,
+  scoreDetails: z.object({
+    throughput: z.string().optional(),
+    reliability: z.string().optional(),
+    trust: z.string().optional(),
+    debt: z.string().optional(),
+  }).optional(),
 });
 const GameStateSchema = z.object({
   schemaVersion: z.literal(1),
@@ -74,6 +82,8 @@ const GameStateSchema = z.object({
   completedTicketIds: z.array(z.string()),
   purchasedUpgradeIds: z.array(z.string()),
   reviews: z.array(ReviewSchema),
+  incidentResponse: z.enum(["none", "active", "scaled", "rate-limited", "rolled-back", "resolved"]),
+  incidentMitigation: z.enum(["none", "scale", "rate-limit", "rollback"]),
   flags: z.object({
     cacheShortcut: z.boolean(),
     privacyDefaultedOn: z.boolean(),
@@ -83,6 +93,12 @@ const GameStateSchema = z.object({
     privacyConsequenceApplied: z.boolean(),
     runtimeConsequenceApplied: z.boolean(),
     raceConsequenceApplied: z.boolean(),
+    testIntegrityAccepted: z.boolean(),
+    contractMismatchAccepted: z.boolean(),
+    requestLoopAccepted: z.boolean(),
+    contractAuditAnnounced: z.boolean(),
+    retryAuditAnnounced: z.boolean(),
+    testConsequenceApplied: z.boolean(),
   }),
   stats: z.object({
     shipped: finiteNumber.nonnegative(),
@@ -245,6 +261,45 @@ function migrateEnvelope(value: unknown): SaveEnvelope {
       }
     }
     version = 6;
+  }
+  if (version === 6) {
+    if (game && typeof game === "object") {
+      const previous = game as Record<string, unknown>;
+      const flags = previous.flags && typeof previous.flags === "object" ? previous.flags as Record<string, unknown> : {};
+      const completed = Array.isArray(previous.completedTicketIds) ? previous.completedTicketIds : [];
+      const resumeDemo = completed.includes("investor-demo") && previous.ending !== null;
+      game = {
+        ...previous,
+        ending: resumeDemo ? null : previous.ending,
+        incidentResponse: "none",
+        incidentMitigation: "none",
+        flags: {
+          ...flags,
+          testIntegrityAccepted: false,
+          contractMismatchAccepted: false,
+          requestLoopAccepted: false,
+          contractAuditAnnounced: false,
+          retryAuditAnnounced: false,
+          testConsequenceApplied: false,
+        },
+        events: resumeDemo && Array.isArray(previous.events) ? [
+          { id: "chapter-two-open", at: typeof previous.gameTime === "number" ? previous.gameTime : 0, tone: "info", title: "The demo became a product", message: "Your completed demo save can continue. Run `tickets read QA-401` for the next chapter." },
+          ...previous.events,
+        ].slice(0, 36) : previous.events,
+      };
+    }
+    version = 7;
+  }
+  if (version === 7) {
+    if (game && typeof game === "object") {
+      const previous = game as Record<string, unknown>;
+      const migrated = { ...previous, incidentMitigation: "none" } as GameState;
+      game = {
+        ...migrated,
+        ending: migrated.ending ? computeEnding({ ...migrated, ending: null }) : null,
+      };
+    }
+    version = 8;
   }
   if (version !== SAVE_VERSION || typeof candidate.savedAt !== "number" || !Number.isFinite(candidate.savedAt)) {
     throw new Error("Invalid save envelope.");

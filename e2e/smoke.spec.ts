@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { createInitialState } from "../src/game/initialState";
+import { computeEnding } from "../src/game/engine";
 
 test("uses both provider CLIs and completes a ticket from a natural-language prompt", async ({ page }) => {
   test.setTimeout(35_000);
@@ -15,6 +16,7 @@ test("uses both provider CLIs and completes a ticket from a natural-language pro
   const command = page.getByRole("textbox", { name: "Anthill Code command" });
   await expect(command).toBeVisible();
   await command.fill("/model couplet");
+  await command.click();
   await command.press("Enter");
   await expect(page.getByText("Switched active model to Couplet.")).toBeVisible();
   await command.fill("please implement APP-101");
@@ -41,6 +43,174 @@ test("uses both provider CLIs and completes a ticket from a natural-language pro
   await forgeCommand.press("Enter");
   await expect(page.getByText("SESSION CONFIGURATION")).toBeVisible();
   await expect(page.getByText(/model\s+Spark/)).toBeVisible();
+});
+
+test("shows the active model in its provider banner and refuses negated work intent", async ({ page }) => {
+  const game = createInitialState();
+  game.peakTrust = 60;
+  await page.addInitScript((savedGame) => {
+    localStorage.setItem("context-switch-emergency-save", JSON.stringify({ version: 8, savedAt: Date.now(), game: savedGame }));
+  }, game);
+  await page.goto("/");
+  const openmindTab = page.getByRole("tab", { name: /OpenMind Forge/ });
+  await openmindTab.click();
+  const forge = page.getByRole("textbox", { name: "OpenMind Forge command" });
+  await forge.fill("/model forge");
+  await forge.press("Enter");
+  await expect(page.locator(".terminal-output")).toContainText("model:     Forge balanced");
+  await expect(page.locator(".terminal-output")).not.toContainText("Spark quick");
+
+  await page.getByRole("tab", { name: /Anthill Code/ }).click();
+  const anthill = page.getByRole("textbox", { name: "Anthill Code command" });
+  await anthill.fill("I do not want you to work on APP-101");
+  await anthill.press("Enter");
+  await expect(page.getByText(/No work started for APP-101/)).toBeVisible();
+  await expect(page.getByText(/ANT · APP-101 →/)).toHaveCount(0);
+});
+
+test("continues a completed demo save into the green-build chapter", async ({ page }) => {
+  const game = createInitialState();
+  game.completedTicketIds = ["deployment-banner", "telemetry-toggle", "cache-summary", "runtime-upgrade", "webhook-backoff", "parallel-reports", "quota-display", "stale-customer-data", "investor-demo"];
+  game.unlockedSessions = 3;
+  game.ending = { title: "Demo complete", message: "Old ending", scores: { throughput: 80, reliability: 80, trust: 80, debt: 5 } };
+  await page.addInitScript((savedGame) => {
+    localStorage.setItem("context-switch-emergency-save", JSON.stringify({ version: 6, savedAt: Date.now(), game: savedGame }));
+  }, game);
+
+  await page.goto("/");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.locator(".terminal-output")).toContainText("Objective: ship QA-401, then a safe first release.");
+  await expect(page.locator(".terminal-output")).not.toContainText("work on APP-101");
+  const command = page.getByRole("textbox", { name: "Anthill Code command" });
+  await command.fill("tickets read QA-401");
+  await command.press("Enter");
+  await expect(page.getByText(/QA-401 · The green build/)).toBeVisible();
+  await expect(page.getByText(/state\s+Ready/)).toBeVisible();
+});
+
+test("refreshes a new conversation with the current chapter objective", async ({ page }) => {
+  const game = createInitialState();
+  game.completedTicketIds = ["deployment-banner", "telemetry-toggle", "cache-summary", "runtime-upgrade", "webhook-backoff", "parallel-reports", "quota-display", "stale-customer-data", "investor-demo"];
+  game.unlockedSessions = 3;
+  await page.addInitScript((savedGame) => {
+    localStorage.setItem("context-switch-emergency-save", JSON.stringify({ version: 8, savedAt: Date.now(), game: savedGame }));
+  }, game);
+
+  await page.goto("/");
+  const command = page.getByRole("textbox", { name: "Anthill Code command" });
+  await command.fill("/new");
+  await command.press("Enter");
+  await expect(page.locator(".terminal-output")).toContainText("Objective: ship QA-401, then a safe first release.");
+  await expect(page.locator(".terminal-output")).toContainText("Try “work on QA-401”");
+  await expect(page.locator(".terminal-output")).not.toContainText("work on APP-101");
+});
+
+test("keeps the full ending and restart action reachable on small viewports", async ({ page }) => {
+  const game = createInitialState();
+  game.completedTicketIds = ["deployment-banner", "investor-demo", "green-build", "account-api", "account-panel", "contract-join", "helpful-retry", "gateway-rollout", "retry-repair", "release-two"];
+  game.ending = computeEnding(game);
+  await page.addInitScript((savedGame) => {
+    localStorage.setItem("context-switch-emergency-save", JSON.stringify({ version: 8, savedAt: Date.now(), game: savedGame }));
+  }, game);
+
+  for (const viewport of [{ width: 320, height: 568 }, { width: 568, height: 320 }]) {
+    await page.setViewportSize(viewport);
+    await page.goto("/");
+    const card = page.locator(".ending-card");
+    await expect(card).toBeVisible();
+    const needsScroll = await card.evaluate((element) => element.scrollHeight > element.clientHeight);
+    expect(needsScroll).toBe(true);
+    await page.getByRole("button", { name: "Start another shift" }).scrollIntoViewIfNeeded();
+    await page.getByRole("button", { name: "Start another shift" }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+  }
+});
+
+test("contains the gateway incident through the provider CLI", async ({ page }) => {
+  const game = createInitialState();
+  game.completedTicketIds = ["investor-demo", "green-build", "account-api", "account-panel", "contract-join", "helpful-retry", "gateway-rollout"];
+  game.unlockedSessions = 3;
+  game.flags.requestLoopAccepted = true;
+  game.flags.retryAuditAnnounced = true;
+  game.incidentResponse = "active";
+  await page.addInitScript((savedGame) => {
+    localStorage.setItem("context-switch-emergency-save", JSON.stringify({ version: 7, savedAt: Date.now(), game: savedGame }));
+  }, game);
+
+  await page.goto("/");
+  const command = page.getByRole("textbox", { name: "Anthill Code command" });
+  await command.fill("incident status");
+  await command.press("Enter");
+  await expect(page.getByText(/GATEWAY INCIDENT · SEV-1/)).toBeVisible();
+  await command.fill("incident mitigate rollback");
+  await command.press("Enter");
+  await expect(page.getByText("Retry feature rolled back")).toBeVisible();
+  await command.fill("tickets read FIX-502");
+  await command.press("Enter");
+  await expect(page.getByText(/FIX-502 · Stop the request loop/)).toBeVisible();
+  await expect(page.getByText(/state\s+Ready/)).toBeVisible();
+});
+
+test("prevents repeating an incident mitigation", async ({ page }) => {
+  const game = createInitialState();
+  game.completedTicketIds = ["investor-demo", "green-build", "account-api", "account-panel", "contract-join", "helpful-retry", "gateway-rollout"];
+  game.unlockedSessions = 3;
+  game.flags.requestLoopAccepted = true;
+  game.flags.retryAuditAnnounced = true;
+  game.incidentResponse = "active";
+  await page.addInitScript((savedGame) => {
+    localStorage.setItem("context-switch-emergency-save", JSON.stringify({ version: 7, savedAt: Date.now(), game: savedGame }));
+  }, game);
+
+  await page.goto("/");
+  const command = page.getByRole("textbox", { name: "Anthill Code command" });
+  await command.fill("incident mitigate rate-limit");
+  await command.press("Enter");
+  await expect(page.getByText("Gateway rate-limited")).toBeVisible();
+  await command.fill("incident mitigate rate-limit");
+  await command.press("Enter");
+  await expect(page.getByText(/error: the gateway is already rate-limited/)).toBeVisible();
+  await expect(page.getByText("Gateway rate-limited")).toHaveCount(1);
+});
+
+test("plays the scaled-incident recovery through the final release in the browser", async ({ page }) => {
+  test.setTimeout(35_000);
+  const game = createInitialState();
+  game.completedTicketIds = ["investor-demo", "green-build", "account-api", "account-panel", "contract-join", "helpful-retry", "gateway-rollout"];
+  game.unlockedSessions = 3;
+  game.flags.requestLoopAccepted = true;
+  game.flags.retryAuditAnnounced = true;
+  game.incidentResponse = "active";
+  await page.addInitScript((savedGame) => {
+    localStorage.setItem("context-switch-emergency-save", JSON.stringify({ version: 8, savedAt: Date.now(), game: savedGame }));
+  }, game);
+
+  await page.goto("/");
+  const command = page.getByRole("textbox", { name: "Anthill Code command" });
+  await command.fill("incident mitigate scale");
+  await command.press("Enter");
+  await expect(page.getByText("Gateway scaled; loop persists")).toBeVisible();
+  await expect(page.getByText(/stabilized service and protected repository health/)).toBeVisible();
+  await command.fill("incident mitigate rate-limit");
+  await command.press("Enter");
+  await expect(page.getByText("Gateway rate-limited")).toBeVisible();
+
+  await command.fill("work on FIX-502");
+  await command.press("Enter");
+  await expect(page.getByText(/FIX-502 is ready for review/)).toBeVisible({ timeout: 8_000 });
+  await command.fill("reviews approve FIX-502");
+  await command.press("Enter");
+  await expect(page.getByText("FIX-502 shipped")).toBeVisible();
+
+  await command.fill("work on SHIP-2");
+  await command.press("Enter");
+  await expect(page.getByText(/SHIP-2 is ready for review/)).toBeVisible({ timeout: 10_000 });
+  await command.fill("reviews approve SHIP-2");
+  await command.press("Enter");
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(page.getByRole("dialog")).toContainText("repaired after rate-limiting traffic");
+  await expect(page.getByRole("dialog")).toContainText("includes idle time and quota restocks");
+  await expect(page.getByRole("dialog")).toContainText("elapsed-time points");
 });
 
 test("keeps inspection intent read-only and exposes save import", async ({ page }) => {

@@ -1,7 +1,7 @@
 import { content, modelById, providerById, ticketById, upgradeById } from "../content";
 import { BALANCE } from "../game/balance";
-import { availableModels, availableTickets, incidentIsOpen, isReviewBlocked, reviewRiskFactors, ticketProgressLabel, visibleTickets } from "../game/selectors";
-import type { GameState, ReviewDecision } from "../game/types";
+import { availableModels, availableTickets, incidentIsOpen, isReviewBlocked, projectedTicketRisk, reviewRiskFactors, ticketProgressLabel, visibleTickets } from "../game/selectors";
+import type { GameState, IncidentMitigation, ReviewDecision } from "../game/types";
 
 export type PaneMode = "agents" | "reviews" | "quota" | "events" | "dashboard";
 export type PermissionMode = "ask" | "plan" | "accept-edits" | "workspace-write";
@@ -20,6 +20,7 @@ export type CliEffect =
   | { type: "review"; reviewId: string; decision: ReviewDecision }
   | { type: "compact"; sessionId: number }
   | { type: "purchase"; upgradeId: string }
+  | { type: "mitigate"; action: IncidentMitigation }
   | { type: "speed"; speed: 1 | 4 | 12 }
   | { type: "clear" }
   | { type: "new-session" }
@@ -134,6 +135,8 @@ function providerHelp(state: GameState, context: CliContext) {
     ...shared,
     ...specific,
     "  upgrades list|buy <ID>      manage structural upgrades",
+    "  incident status            inspect a live gateway incident",
+    "  incident mitigate <ACTION> scale | rate-limit | rollback",
     "  events [N]                  tail the activity stream",
     "  speed <1|4|12>              set simulation speed",
     state.completedTicketIds.length >= 1 ? "  tab new [PROVIDER] [NAME]   attach another provider session" : "  [locked] extra sessions · ship 1 ticket",
@@ -180,23 +183,30 @@ function status(state: GameState, context: CliContext) {
   ].join("\n");
 }
 
-function listTickets(state: GameState) {
-  const header = `${pad("KEY", 10)} ${pad("STATE", 12)} ${pad("RISK", 8)} TITLE`;
+function listTickets(state: GameState, context: CliContext) {
+  const header = `${pad("KEY", 10)} ${pad("STATE", 12)} ${pad("BASE/EST", 14)} TITLE`;
   const rows = visibleTickets(state).map((ticket) => {
     const progress = ticketProgressLabel(state, ticket.id).toUpperCase();
-    const risk = ticket.baseRisk < 0.2 ? "low" : ticket.baseRisk < 0.4 ? "medium" : "high";
-    return `${pad(ticket.key, 10)} ${pad(progress, 12)} ${pad(risk, 8)} ${ticket.title}`;
+    const estimate = projectedTicketRisk(state, ticket.id, context.permissionMode === "plan", context.reasoning, context.modelId);
+    const risk = `${Math.round(ticket.baseRisk * 100)}%/${estimate.min}-${estimate.max}%${ticket.riskFlag === "none" ? "" : " !"}`;
+    return `${pad(ticket.key, 10)} ${pad(progress, 12)} ${pad(risk, 14)} ${ticket.title}`;
   });
-  return [header, ...rows].join("\n");
+  return [header, ...rows, "", `Risk is ticket baseline / estimate for the selected model and ${context.reasoning} reasoning with current repo, session, and upgrades. Plan mode lowers the estimate; ! marks a known review finding.`].join("\n");
 }
 
-function readTicket(state: GameState, reference?: string) {
+function readTicket(state: GameState, reference?: string, context?: CliContext) {
   const ticket = findTicket(reference);
   if (!ticket) return error("ticket not found; use `tickets list`");
   const dependencies = ticket.prerequisites.length
     ? ticket.prerequisites.map((id) => `${ticketById.get(id)?.key ?? id}:${state.completedTicketIds.includes(id) ? "done" : "open"}`).join(", ")
     : "none";
-  const incidentDependency = ticket.id === "stale-customer-data" && incidentIsOpen(state, "cache-shortcut") ? ", FIX-204:open" : "";
+  const incidentDependency = ticket.blockedByIncident && incidentIsOpen(state, ticket.blockedByIncident)
+    ? `, ${content.tickets.find((candidate) => candidate.incidentFor === ticket.blockedByIncident)?.key ?? "repair"}:open`
+    : ticket.id === "retry-repair" && ["active", "scaled"].includes(state.incidentResponse)
+      ? ", incident mitigation:open"
+      : "";
+  const estimate = projectedTicketRisk(state, ticket.id, context?.permissionMode === "plan", context?.reasoning, context?.modelId);
+  const knownFinding = ticket.riskFlag === "none" ? "" : " · ! known review finding";
   return {
     messages: [output([
       `${ticket.key} · ${ticket.title}`,
@@ -205,7 +215,7 @@ function readTicket(state: GameState, reference?: string) {
       `brief       ${ticket.brief}`,
       `depends     ${dependencies}${incidentDependency}`,
       `files       ${ticket.files.join(", ")}`,
-      `risk        ${Math.round(ticket.baseRisk * 100)}% base · ${ticket.recommendedTier} model recommended`,
+      `risk        ${Math.round(ticket.baseRisk * 100)}% base · ${estimate.min}-${estimate.max}% estimated with selected ${content.models.find((model) => model.id === context?.modelId)?.name ?? "model"} and ${context?.reasoning ?? "medium"} reasoning · ${ticket.recommendedTier} model recommended${knownFinding}`,
       `reward      +${ticket.rewardTrust} trust`,
       "",
       ticket.summary,
@@ -264,11 +274,15 @@ function readReview(state: GameState, reference?: string) {
       ? "BLOCKED: high aggregate risk; revise or escalate before approving"
       : "BLOCKED: approve will ship the warning as a known defect"
     : "PASS: approve is supported by the current evidence";
-  const history = ticket.kind === "finale"
+  const history = ticket.kind === "finale" || ticket.id === "investor-demo"
     ? [
         `history     privacy ${incidentIsOpen(state, "privacy-default") ? "open" : state.flags.privacyDefaultedOn ? "repaired" : "clean"} · cache ${incidentIsOpen(state, "cache-shortcut") ? "stale" : state.flags.cacheShortcut ? "repaired" : "clean"}`,
         `            runtime ${incidentIsOpen(state, "runtime-drift") ? "drifted" : state.flags.runtimeDriftAccepted ? "repaired" : "clean"} · exports ${incidentIsOpen(state, "merge-race") ? "racy" : state.flags.raceAccepted ? "repaired" : "isolated"}`,
         `            health ${Math.round(state.repoHealth)} · debt ${Math.round(state.debt)} · trust ${Math.round(state.trust)}`,
+        ...(ticket.id === "release-two" ? [
+          `            tests ${incidentIsOpen(state, "test-integrity") ? "assertion missing" : state.flags.testIntegrityAccepted ? "repaired" : "intact"} · contract ${incidentIsOpen(state, "contract-mismatch") ? "incompatible" : state.flags.contractMismatchAccepted ? "repaired" : "compatible"}`,
+          `            gateway ${state.incidentResponse === "none" ? "healthy" : state.incidentResponse}`,
+        ] : []),
       ]
     : [];
   return {
@@ -276,7 +290,7 @@ function readReview(state: GameState, reference?: string) {
       `REVIEW ${ticket.key} · review risk score ${Math.round(review.risk * 100)}/100`,
       `gate        ${unresolvedFinding ? "unresolved finding" : "passed"}`,
       `risk source ${reviewRiskFactors(state, review)}`,
-      `change      ${session.reviewRound > 0 ? `Revised: ${ticket.evidence.summary}` : ticket.evidence.summary}`,
+      `change      ${resolution?.summary ?? (session.reviewRound > 0 ? `Revised: ${ticket.evidence.summary}` : ticket.evidence.summary)}`,
       `tests       ${tests}`,
       `warning     ${warning}`,
       ...history,
@@ -285,7 +299,7 @@ function readReview(state: GameState, reference?: string) {
       "",
       `approve     reviews approve ${ticket.key}    ship now; ${unresolvedFinding ? "known defect escapes" : "gate passed"}`,
       `revise      reviews revise ${ticket.key}     resolve finding; another agent pass`,
-      `escalate    reviews escalate ${ticket.key}   ${state.trust >= BALANCE.escalationTrustCost ? `safe senior review; -${BALANCE.escalationTrustCost} trust and no delivery reward` : `unavailable; requires ${BALANCE.escalationTrustCost} trust`}`,
+      `escalate    reviews escalate ${ticket.key}   ${state.trust >= BALANCE.escalationTrustCost ? `independent check; +4 health, -${BALANCE.escalationTrustCost} trust, no delivery reward` : `unavailable; requires ${BALANCE.escalationTrustCost} trust`}`,
     ].join("\n"))],
   };
 }
@@ -303,8 +317,15 @@ function upgrades(state: GameState) {
     `${pad("ID", 24)} ${pad("COST", 8)} ${pad("STATE", 12)} UPGRADE`,
     ...content.upgrades.map((upgrade) => {
       const bought = state.purchasedUpgradeIds.includes(upgrade.id);
-      const unlocked = state.completedTicketIds.length >= upgrade.unlockAfter;
-      return `${pad(upgrade.id, 24)} ${pad(upgrade.cost, 8)} ${pad(bought ? "active" : unlocked ? "ready" : `ship ${upgrade.unlockAfter}`, 12)} ${upgrade.name}\n  ${upgrade.description}`;
+      const ticketReady = !upgrade.requiresTicketId || state.completedTicketIds.includes(upgrade.requiresTicketId);
+      const incidentReady = !upgrade.requiresResolvedIncident || !incidentIsOpen(state, upgrade.requiresResolvedIncident);
+      const unlocked = state.completedTicketIds.length >= upgrade.unlockAfter && ticketReady && incidentReady;
+      const requirement = !ticketReady
+        ? ticketById.get(upgrade.requiresTicketId!)?.key ?? upgrade.requiresTicketId!
+        : !incidentReady
+          ? `repair ${content.tickets.find((ticket) => ticket.incidentFor === upgrade.requiresResolvedIncident)?.key ?? "incident"}`
+          : `${upgrade.unlockAfter}`;
+      return `${pad(upgrade.id, 24)} ${pad(upgrade.cost, 8)} ${pad(bought ? "active" : unlocked ? "ready" : `ship ${requirement}`, 12)} ${upgrade.name}\n  ${upgrade.description}`;
     }),
   ].join("\n");
 }
@@ -323,6 +344,29 @@ function muxStatus(state: GameState) {
     `  ${shipped >= 3 ? "[ready]" : "[locked]"} full-window operations      ${shipped >= 3 ? "watch agents|reviews|quota|events" : "ship 3 tickets"}`,
     `  ${shipped >= 3 ? "[ready]" : "[locked]"} split panes                 ${shipped >= 3 ? "pane split <VIEW|TAB#> · pane swap|close" : "ship 3 tickets"}`,
     `  ${dashboard ? "[ready]" : "[upgrade]"} live graphical dashboard   ${dashboard ? "dashboard" : "upgrades buy terminal-dashboard"}`,
+  ].join("\n");
+}
+
+function incidentStatus(state: GameState) {
+  if (state.incidentResponse === "none") {
+    return incidentIsOpen(state, "request-loop")
+      ? "GATEWAY WATCH\n  state         latent request-loop risk\n  evidence      UI-502 changed the request effect; API-503 has not completed the overlap yet\n  action        run FIX-502 before the gateway rollout to prevent the incident"
+      : "GATEWAY WATCH\n  state         healthy\n  account requests remain bounded";
+  }
+  if (state.incidentResponse === "resolved") {
+    return "GATEWAY INCIDENT\n  state         resolved\n  evidence      FIX-502 passed repeated-render and recovery-load checks";
+  }
+  return [
+    "GATEWAY INCIDENT · SEV-1",
+    `  state         ${state.incidentResponse}`,
+    "  symptom       account requests spike during gateway rollout",
+    "  client trace  each render creates a fresh request-options object",
+    "  gateway      canary passed alone; extra capacity does not stop new requests",
+    `  repair       ${["active", "scaled"].includes(state.incidentResponse) ? "blocked until load is contained" : "FIX-502 is ready"}`,
+    "",
+    "  incident mitigate rollback     stop the bad client; feature temporarily unavailable; −4 trust",
+    ...(state.incidentResponse === "rate-limited" ? [] : ["  incident mitigate rate-limit   keep feature live with delayed requests; −2 trust, +3 debt"]),
+    ...(state.incidentResponse === "active" ? ["  incident mitigate scale        stabilize service; +8 health, −6 trust, +4 debt; loop persists"] : []),
   ].join("\n");
 }
 
@@ -356,10 +400,24 @@ function naturalLanguagePrompt(raw: string, state: GameState, context: CliContex
   const reference = raw.match(/\b[A-Z]{2,10}-\d+\b/i)?.[0];
   if (!reference) {
     const provider = providerById.get(context.providerId);
-    return { messages: [output(`${provider?.name ?? "Agent"}: describe the work with a ticket key, for example “work on APP-101”.`, "muted")] };
+    const next = availableTickets(state).find((ticket) => !ticket.incidentFor && ticket.kind !== "finale");
+    const guidance = next
+      ? `The next ready ticket is ${next.key}; try “work on ${next.key}”.`
+      : "List the backlog to choose an available ticket.";
+    return { messages: [output(`${provider?.name ?? "Agent"}: include a ticket key in the task. ${guidance}`, "muted")] };
+  }
+  const negatedWork = /\b(?:do\s+not|don['’]t|dont|never|avoid|should\s+not|shouldn['’]t|will\s+not|won['’]t)\s+(?:(?:want|need|plan|intend)\s+(?:(?:you|me|us)\s+)?(?:to\s+)?)?(?:please\s+)?(?:(?:you|me|us)\s+)?(?:work(?:ing)?|implement|start|begin|assign|touch|change|fix|ship|run|do(?:\s+(?:any\s+)?work)?)\b|\b(?:would\s+rather\s+not|rather\s+not)\s+(?:work(?:ing)?|implement|start|assign|touch|change|fix|ship|run)\b|\b(?:hold\s+off\s+on|refrain\s+from)\s+(?:work(?:ing)?|implement|starting|assigning|touching|changing|fixing|shipping|running)\b|\bdelay\s+(?:the\s+)?(?:work|working|implementation|start(?:ing)?|assignment|change|fix|ship(?:ping)?|run(?:ning)?)\b|\bpostpone\s+(?:the\s+)?(?:work|working|implementation|start(?:ing)?|assignment|change|fix|ship(?:ping)?|run(?:ning)?)\b|\bwait\s+(?:to\s+)?(?:work|start|begin|assign|implement|run)\b|\b(?:cannot|can\s+not|can['’]t|unable\s+to)\s+(?:work|start|begin|assign|implement|run)\b|\bnot\s+ready\s+to\s+(?:work|start|begin|assign|implement|run)\b|\bnot\s+yet\b/i;
+  if (negatedWork.test(raw)) {
+    return { messages: [output(`No work started for ${reference}. Use "work on ${reference}" when you want to assign it.`, "muted")] };
   }
   if (/\b(review|inspect|diff)\b/i.test(raw)) {
     return readReview(state, reference);
+  }
+  const affirmativeWork = /^\s*(?:please\s+)?(?:work\s+on|implement|start|begin|assign|take|touch|change|fix|ship|run)\b/i.test(raw)
+    || /\b(?:can|could|would)\s+you\s+(?:please\s+)?(?:work\s+on|implement|start|begin|assign|take|touch|change|fix|ship|run)\b/i.test(raw)
+    || /\b(?:I|we)\s+(?:want|need|would\s+like)\s+you\s+to\s+(?:work\s+on|implement|start|begin|assign|take|touch|change|fix|ship|run)\b/i.test(raw);
+  if (!affirmativeWork) {
+    return { messages: [output(`No work started for ${reference}. Use "work on ${reference}" when you want to assign it.`, "muted")] };
   }
   return runTicket(state, context, reference, [], raw);
 }
@@ -426,9 +484,20 @@ export function evaluateCommand(raw: string, state: GameState, suppliedContext: 
     return { messages: [output("Repository guidance loaded\n\n  • use fictional providers and models\n  • preserve deterministic game rules\n  • run checks before shipping\n  • keep changes scoped to the active ticket", "success")] };
   }
 
+  if (command === "incident") {
+    if (!subcommand || subcommand === "status") return { messages: [output(incidentStatus(state))] };
+    if (subcommand !== "mitigate") return error("usage: incident status|mitigate <scale|rate-limit|rollback>");
+    const action = tokens[2]?.toLowerCase();
+    if (!action || !["scale", "rate-limit", "rollback"].includes(action)) return error("usage: incident mitigate <scale|rate-limit|rollback>");
+    if (!["active", "scaled", "rate-limited"].includes(state.incidentResponse)) return error("no live gateway incident needs mitigation");
+    if (action === "scale" && state.incidentResponse !== "active") return error("capacity was already tried; contain the request loop instead");
+    if (action === "rate-limit" && state.incidentResponse === "rate-limited") return error("the gateway is already rate-limited; start FIX-502 or roll back the retry feature");
+    return { messages: [output(`incident.${action} · applying containment`, "muted")], effect: { type: "mitigate", action: action as IncidentMitigation } };
+  }
+
   if (command === "tickets") {
-    if (!subcommand || subcommand === "list") return { messages: [output(listTickets(state))] };
-    if (subcommand === "read" || subcommand === "show") return readTicket(state, tokens[2]);
+    if (!subcommand || subcommand === "list") return { messages: [output(listTickets(state, context))] };
+    if (subcommand === "read" || subcommand === "show") return readTicket(state, tokens[2], context);
     return error("usage: tickets <list|read KEY>");
   }
 
@@ -557,6 +626,8 @@ export function commandSuggestions(providerId: string, state?: GameState) {
       ? ["/help", "/status", "/model", "/reasoning high", "implement APP-101"]
       : ["/help", "/status", "/model", "/context", "work on APP-101"];
   }
+
+  if (["active", "scaled"].includes(state.incidentResponse)) return ["incident status", "incident mitigate rollback", "incident mitigate rate-limit", "tickets list", "events 5"];
 
   const review = state.reviews.find((candidate) => modelById.get(state.sessions[candidate.sessionId]?.modelId ?? "")?.providerId === providerId) ?? state.reviews[0];
   const reviewTicket = review ? ticketById.get(review.ticketId) : undefined;

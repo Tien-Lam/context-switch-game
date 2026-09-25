@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { advanceGame, compactSession, GameRuleError, reviewTicket, startTicket } from "../src/game/engine";
+import { advanceGame, compactSession, computeEnding, GameRuleError, mitigateIncident, reviewTicket, startTicket } from "../src/game/engine";
 import { BALANCE } from "../src/game/balance";
 import { createInitialState } from "../src/game/initialState";
 import { availableModels, availableTickets, incidentIsOpen, isReviewBlocked, visibleTickets } from "../src/game/selectors";
@@ -123,6 +123,28 @@ describe("agent simulation", () => {
     expect(advanced.stats.quotaSpent - state.stats.quotaSpent).toBeCloseTo(content.providers.find((provider) => provider.id === "anthill")!.regenPerSecond, 10);
   });
 
+  it("keeps generated event IDs stable across elapsed-time partitions", () => {
+    const setup = () => {
+      let state = createInitialState();
+      state = startTicket(state, 0, "deployment-banner", "ballad");
+      state = advanceGame(state, 5);
+      state = reviewTicket(state, state.reviews[0].id, "approve");
+      state = startTicket(state, 0, "telemetry-toggle", "ballad");
+      state = startTicket(state, 1, "cache-summary", "ballad");
+      state = structuredClone(state);
+      state.providerQuota.anthill = 0;
+      return state;
+    };
+    const coarse = advanceGame(setup(), 25);
+    let jittered = setup();
+    for (let second = 0; second < 25; second += 1) {
+      for (const pulse of [0.07, 0.18, 0.11, 0.39, 0.25]) jittered = advanceGame(jittered, pulse);
+    }
+
+    expect(jittered.events.map((event) => event.id)).toEqual(coarse.events.map((event) => event.id));
+    expect(jittered.reviews.map((review) => review.id)).toEqual(coarse.reviews.map((review) => review.id));
+  });
+
   it("tracks actual overlapping work so workspace isolation removes its risk", () => {
     const run = (isolated: boolean) => {
       let state = createInitialState();
@@ -157,13 +179,15 @@ describe("agent simulation", () => {
   });
 
   it("makes escalation trade delivery reward for immediate certainty", () => {
-    let state = startTicket(createInitialState(), 0, "deployment-banner", "ballad");
+    const initial = createInitialState();
+    let state = startTicket(initial, 0, "deployment-banner", "ballad");
     state = advanceGame(state, 5);
     state = reviewTicket(state, state.reviews[0].id, "escalate");
 
     expect(state.completedTicketIds).toContain("deployment-banner");
     expect(state.trust).toBe(30 - BALANCE.escalationTrustCost);
     expect(state.stats.escalations).toBe(1);
+    expect(state.repoHealth).toBe(initial.repoHealth + 6.5);
   });
 
   it("turns an authored warning into a safe approval only after revision", () => {
@@ -283,8 +307,8 @@ describe("agent simulation", () => {
 
   it("uses the displayed risk score to block a high-risk finale review", () => {
     const state = createInitialState();
-    state.sessions[0] = { ...state.sessions[0], status: "awaiting-review", ticketId: "investor-demo", modelId: "spark", progress: 1 };
-    const review = { id: "final-high-risk", ticketId: "investor-demo", sessionId: 0, risk: 0.72, createdAt: 1 };
+    state.sessions[0] = { ...state.sessions[0], status: "awaiting-review", ticketId: "release-two", modelId: "spark", progress: 1 };
+    const review = { id: "final-high-risk", ticketId: "release-two", sessionId: 0, risk: 0.72, createdAt: 1 };
     state.reviews.push(review);
 
     expect(isReviewBlocked(state, review)).toBe(true);
@@ -302,18 +326,43 @@ describe("agent simulation", () => {
     expect(high.reviews[0].risk).toBeCloseTo(normal.reviews[0].risk - 0.09);
   });
 
-  it("charges idle waiting to final throughput", () => {
+  it("counts long idle waits toward throughput and explains the score", () => {
     const finish = (idleSeconds: number) => {
       let state = createInitialState();
       state.completedTicketIds = content.tickets.filter((ticket) => !ticket.incidentFor && ticket.kind !== "finale").map((ticket) => ticket.id);
       state.unlockedSessions = 3;
       state = advanceGame(state, idleSeconds);
-      state = startTicket(state, 0, "investor-demo", "ballad");
+      state = startTicket(state, 0, "release-two", "ballad");
       state = advanceGame(state, 13);
       state = reviewTicket(state, state.reviews[0].id, "approve");
-      return state.ending!.scores.throughput;
+      return state.ending!;
     };
 
-    expect(finish(90)).toBeLessThan(finish(0));
+    const withoutIdle = finish(0);
+    const withIdle = finish(600);
+    expect(withIdle.scores.throughput).toBeLessThan(withoutIdle.scores.throughput);
+    expect(withIdle.scoreDetails?.throughput).toContain("includes idle time and quota restocks");
+    expect(withIdle.scoreDetails?.reliability).toContain("repository health");
+  });
+
+  it("does not charge a repeated rate-limit mitigation", () => {
+    const state = createInitialState();
+    state.incidentResponse = "active";
+    const limited = mitigateIncident(state, "rate-limit");
+    const eventsBefore = limited.events.length;
+
+    expect(() => mitigateIncident(limited, "rate-limit")).toThrow(/already rate-limited/i);
+    expect(limited.trust).toBe(state.trust - 2);
+    expect(limited.debt).toBe(state.debt + 3);
+    expect(limited.events.length).toBe(eventsBefore);
+  });
+
+  it("describes a pre-rollout retry repair without inventing a mitigation", () => {
+    const state = createInitialState();
+    state.flags.requestLoopAccepted = true;
+    state.completedTicketIds.push("retry-repair");
+
+    expect(computeEnding(state).message).toContain("the retry loop was repaired before the gateway rollout");
+    expect(computeEnding(state).message).not.toContain("after the mitigation");
   });
 });

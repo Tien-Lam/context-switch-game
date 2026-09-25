@@ -1,5 +1,6 @@
-const CACHE = "context-switch-v1";
-const SHELL = ["/", "/index.html", "/manifest.webmanifest"];
+const CACHE = "context-switch-v2";
+const SCOPE = self.registration.scope;
+const SHELL = [SCOPE, new URL("index.html", SCOPE).href, new URL("manifest.webmanifest", SCOPE).href];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(SHELL)));
@@ -12,10 +13,10 @@ self.addEventListener("activate", (event) => {
 });
 
 self.addEventListener("fetch", (event) => {
-  if (event.request.method !== "GET") return;
+  if (event.request.method !== "GET" || !event.request.url.startsWith(SCOPE)) return;
   event.respondWith(fetch(event.request).then((response) => {
     const copy = response.clone();
-    caches.open(CACHE).then((cache) => cache.put(event.request, copy));
+    if (response.ok) caches.open(CACHE).then((cache) => cache.put(event.request, copy));
     return response;
-  }).catch(() => caches.match(event.request).then((cached) => cached || caches.match("/index.html"))));
+  }).catch(() => caches.match(event.request).then((cached) => cached || (event.request.mode === "navigate" ? caches.match(new URL("index.html", SCOPE).href) : undefined))));
 });

@@ -2,7 +2,7 @@
   "name": "Context Switch",
   "short_name": "CtxSwitch",
   "description": "A narrative agent-management game.",
-  "start_url": "/",
+  "start_url": ".",
   "display": "standalone",
   "background_color": "#090a0f",
   "theme_color": "#7c5cff"

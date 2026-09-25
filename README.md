@@ -16,13 +16,15 @@ Run `/help` in either provider session for its command reference and `mux` to in
 
 Risky approvals can open short `FIX-*` incident tickets. They appear only after the related defect escapes review. Completing the repair before the later audit prevents that consequence; an unresolved incident changes the final ledger and ending.
 
+The investor demo is now a chapter break. Its follow-up pack starts with QA-401's suspicious green build, then opens API-420 and UI-421 for parallel provider work. Their combined contract check can reveal an incompatibility even when each branch passed its own tests. The last arc pairs a retrying client with a gateway rollout. If the client creates a request loop, `incident status` shows the evidence and `incident mitigate rollback|rate-limit|scale` offers immediate containment choices before FIX-502 can start. Repairing the retry before the gateway ships prevents the incident entirely. SHIP-2 closes the run.
+
 The second shipment triggers a fictional Anthill plan change. Its quota reduction makes the independent OpenMind pool useful early in the shift. `trace` shows the current run's local events and counters. `sound on|off` and `motion reduce|auto` control optional review chimes and animation; the title bar exposes both settings. No usage data leaves the browser.
 
 ## Pacing principle
 
 Waiting is not the challenge. Normal-speed agent runs reach review in roughly 3–16 seconds, with the tutorial completing in about 3 seconds. Parallel execution unlocks after that first shipment. The pressure comes from switching providers before quota becomes a bottleneck, reviewing multiple changes, accepting risky shortcuts, and fixing the consequences quickly.
 
-The player is the human judgment in the loop, so there is no artificial attention or energy meter. Planning and compaction consume provider quota, revisions consume another agent pass, and escalation spends organizational trust while forfeiting the ticket's delivery reward. Approval is immediate: the decision comes from the displayed change summary, test result, warning signal, diff scope, review score, and explicit pass/blocked gate.
+The player is the human judgment in the loop, so there is no artificial attention or energy meter. Planning and compaction consume provider quota, revisions consume another agent pass, and escalation trades organizational trust and the ticket reward for an independent check that strengthens repository health. Approval is immediate: the decision comes from the displayed change summary, test result, warning signal, diff scope, review score, and explicit pass/blocked gate.
 
 ## Development
 
@@ -42,7 +44,9 @@ mise exec -- bun run check
 
 `mise exec -- bun run build` creates a static site in `dist/`. The build uses relative asset paths so it can be served from a domain root or a subdirectory. Serve the directory over HTTPS with any static host; the game uses browser-local IndexedDB and localStorage for saves. Export a save before clearing site data or switching browsers. The game has no server or external AI dependency.
 
-This is a short scripted first-shift alpha. The main route has nine tickets, with four conditional incident repairs. Real-player timing and a longer 20–30 minute chapter remain to be validated before a wider release.
+The `main` branch publishes the game to GitHub Pages through [the Pages workflow](.github/workflows/pages.yml). The workflow installs the tools from `mise.toml`, runs the quality gate, and deploys `dist/`. GitHub Pages must use **GitHub Actions** as its publishing source. The browser stores saves per site origin, so a save from a local preview does not appear on the hosted site unless it is exported and imported.
+
+This is a scripted local alpha with 16 main-route tickets and seven conditional repair tickets across two chapters. Real-player timing and overall pacing remain to be validated before a wider release.
 
 Browser smoke tests, after Playwright's project-local browser is available:
 

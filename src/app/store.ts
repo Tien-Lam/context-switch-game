@@ -1,8 +1,8 @@
 import { create } from "zustand";
 import { BALANCE } from "../game/balance";
-import { advanceGame, buyUpgrade, compactSession, GameRuleError, reviewTicket, startTicket } from "../game/engine";
+import { advanceGame, buyUpgrade, compactSession, GameRuleError, mitigateIncident, reviewTicket, startTicket } from "../game/engine";
 import { createInitialState } from "../game/initialState";
-import type { GameState, ReviewDecision } from "../game/types";
+import type { GameState, IncidentMitigation, ReviewDecision } from "../game/types";
 import { clearSave, loadGame, parseSave, saveGame, serialiseSave } from "./persistence";
 
 type Speed = 1 | 4 | 12;
@@ -23,6 +23,7 @@ interface GameStore {
   review: (reviewId: string, decision: ReviewDecision) => string | null;
   compact: (sessionId: number) => string | null;
   purchase: (upgradeId: string) => string | null;
+  mitigate: (action: IncidentMitigation) => string | null;
   dismissNotice: () => void;
   exportSave: () => string;
   importSave: (serialised: string) => Promise<boolean>;
@@ -89,6 +90,7 @@ export const useGameStore = create<GameStore>((set, get) => {
     review: (reviewId, decision) => commit((state) => reviewTicket(state, reviewId, decision)),
     compact: (sessionId) => commit((state) => compactSession(state, sessionId)),
     purchase: (upgradeId) => commit((state) => buyUpgrade(state, upgradeId)),
+    mitigate: (action) => commit((state) => mitigateIncident(state, action)),
     dismissNotice: () => set({ notice: null, offlineSeconds: 0 }),
     exportSave: () => serialiseSave(get().game, Date.now()),
     importSave: async (serialised) => {

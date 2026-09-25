@@ -205,12 +205,12 @@ function ReviewQueue({ game }: { game: GameState }) {
             return (
               <article className="review-card" key={item.id}>
                 <div className="review-top"><div><span className="eyebrow">{ticket.key}</span><h3>{ticket.title}</h3></div><span className={`risk ${unresolvedFinding ? "risk-high-risk" : "risk-low-risk"}`}>{riskLabel} · {Math.round(item.risk * 100)}/100</span></div>
-                <p>{session.reviewRound > 0 ? `Revised: ${ticket.evidence.summary}` : ticket.evidence.summary}</p>
+                <p>{resolution?.summary ?? (session.reviewRound > 0 ? `Revised: ${ticket.evidence.summary}` : ticket.evidence.summary)}</p>
                 <ul className="evidence-list"><li><Check />{resolution?.tests ?? ticket.evidence.tests}</li><li><AlertTriangle />{resolution?.signal ?? ticket.evidence.signal}</li><li><FileCode2 />{ticket.files.join(" · ")}</li><li><CircleGauge />Risk: {reviewRiskFactors(game, item)}</li></ul>
                 <div className="review-actions">
                   <button onClick={() => review(item.id, "approve")}><Check />Approve <span>{unresolvedFinding ? item.risk >= 0.6 ? "high-risk change" : "known defect" : "ship now"}</span></button>
                   <button onClick={() => review(item.id, "revise")}><RefreshCcw />Revise <span>resolve finding</span></button>
-                  <button disabled={game.trust < BALANCE.escalationTrustCost} onClick={() => review(item.id, "escalate")}><Sparkles />Escalate <span>{game.trust >= BALANCE.escalationTrustCost ? `−${BALANCE.escalationTrustCost} trust · no reward` : `need ${BALANCE.escalationTrustCost} trust`}</span></button>
+                  <button disabled={game.trust < BALANCE.escalationTrustCost} onClick={() => review(item.id, "escalate")}><Sparkles />Escalate <span>{game.trust >= BALANCE.escalationTrustCost ? `+4 health · −${BALANCE.escalationTrustCost} trust` : `need ${BALANCE.escalationTrustCost} trust`}</span></button>
                 </div>
               </article>
             );
@@ -295,7 +295,10 @@ function Ending({ onRestart }: { onRestart: () => void }) {
         <h2 id="ending-title">{ending.title}</h2>
         <p>{ending.message}</p>
         <div className="score-grid">
-          {Object.entries(ending.scores).map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong><Meter value={label === "debt" ? 100 - value : value} label={label} /></div>)}
+          {Object.entries(ending.scores).map(([label, value]) => {
+            const detail = ending.scoreDetails?.[label as keyof typeof ending.scores];
+            return <div key={label}><span>{label}</span><strong>{value}</strong><Meter value={label === "debt" ? 100 - value : value} label={label} />{detail && <small>{detail}</small>}</div>;
+          })}
         </div>
         <button className="primary-button" onClick={onRestart}><RefreshCcw />Start another shift</button>
       </section>
@@ -331,9 +334,14 @@ let terminalLineId = 0;
 let terminalTabId = 1;
 const terminalLine = (kind: TerminalLineKind, text: string): TerminalLine => ({ id: terminalLineId += 1, kind, text });
 
-function providerBanner(providerId: string, modelId: string) {
+function providerBanner(providerId: string, modelId: string, state = useGameStore.getState().game) {
   const provider = providerById.get(providerId)!;
   const model = modelById.get(modelId)!;
+  const nextTicket = availableTickets(state).find((ticket) => !ticket.incidentFor && ticket.kind !== "finale");
+  const objective = nextTicket
+    ? `Objective: ship ${nextTicket.key}, then a safe first release.`
+    : "Objective: review the active release and ship the safest next change.";
+  const example = nextTicket ? `Try “work on ${nextTicket.key}”, or run /help.` : "Review tickets with `tickets list`, or run /help.";
   if (providerId === "openmind") {
     return [
       "╭──────────────────────────────────────────────────╮",
@@ -342,7 +350,8 @@ function providerBanner(providerId: string, modelId: string) {
       "│ directory: ~/delivery                            │",
       "╰──────────────────────────────────────────────────╯",
       provider.description,
-      "Describe a task, mention a ticket key, or run /help.",
+      objective,
+      example,
     ].join("\n");
   }
   return [
@@ -352,7 +361,8 @@ function providerBanner(providerId: string, modelId: string) {
     "│ ~/delivery                                       │",
     "╰──────────────────────────────────────────────────╯",
     provider.description,
-    "Try “work on APP-101”, or run /help for commands.",
+    objective,
+    example,
   ].join("\n");
 }
 
@@ -586,10 +596,17 @@ export function App() {
     if (effect.type === "review") failure = store.review(effect.reviewId, effect.decision);
     if (effect.type === "compact") failure = store.compact(effect.sessionId);
     if (effect.type === "purchase") failure = store.purchase(effect.upgradeId);
+    if (effect.type === "mitigate") failure = store.mitigate(effect.action);
     if (effect.type === "speed") store.setSpeed(effect.speed);
     if (effect.type === "clear") updateTab(tabId, (tab) => ({ ...tab, history: [] }));
-    if (effect.type === "new-session") updateTab(tabId, (tab) => tab.providerId && tab.modelId ? { ...tab, history: [terminalLine("system", providerBanner(tab.providerId, tab.modelId))], input: "", commands: [], commandCursor: 0 } : tab);
-    if (effect.type === "model") updateTab(tabId, (tab) => ({ ...tab, modelId: effect.modelId }));
+    if (effect.type === "new-session") updateTab(tabId, (tab) => tab.providerId && tab.modelId ? { ...tab, history: [terminalLine("system", providerBanner(tab.providerId, tab.modelId, store.game))], input: "", commands: [], commandCursor: 0 } : tab);
+    if (effect.type === "model") updateTab(tabId, (tab) => ({
+      ...tab,
+      modelId: effect.modelId,
+      history: tab.history.map((line, index) => index === 0 && line.kind === "system"
+        ? { ...line, text: providerBanner(tab.providerId ?? "anthill", effect.modelId, store.game) }
+        : line),
+    }));
     if (effect.type === "permissions") updateTab(tabId, (tab) => ({ ...tab, permissionMode: effect.mode }));
     if (effect.type === "reasoning") updateTab(tabId, (tab) => ({ ...tab, reasoning: effect.mode }));
     if (effect.type === "tab-new") addTab(effect.providerId, effect.name);
@@ -612,7 +629,7 @@ export function App() {
     if (effect.type === "import") importInputRef.current?.click();
     if (effect.type === "restart") await restartRun();
     if (failure) appendLines(tabId, [terminalLine("error", `error: ${failure}`)]);
-    else if (["assign", "review", "compact", "purchase"].includes(effect.type)) appendLines(tabId, [terminalLine("success", "ok")]);
+    else if (["assign", "review", "compact", "purchase", "mitigate"].includes(effect.type)) appendLines(tabId, [terminalLine("success", "ok")]);
   };
 
   const execute = async (raw: string, tabId = activeTabId) => {
@@ -629,6 +646,20 @@ export function App() {
   };
 
   useEffect(() => { void hydrate(); }, [hydrate]);
+  useEffect(() => {
+    if (!hydrated) return;
+    setTabs((current) => {
+      let changed = false;
+      const next = current.map((tab) => {
+        if (tab.kind !== "provider" || !tab.providerId || !tab.modelId || tab.history[0]?.kind !== "system") return tab;
+        const banner = providerBanner(tab.providerId, tab.modelId, game);
+        if (tab.history[0].text === banner) return tab;
+        changed = true;
+        return { ...tab, history: [{ ...tab.history[0], text: banner }, ...tab.history.slice(1)] };
+      });
+      return changed ? next : current;
+    });
+  }, [game, hydrated]);
   useEffect(() => {
     if (!hydrated) return;
     const interval = window.setInterval(() => pulse(Date.now()), 250);

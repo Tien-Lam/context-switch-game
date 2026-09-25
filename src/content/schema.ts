@@ -42,12 +42,14 @@ export const TicketSchema = z.object({
     tests: z.string(),
     signal: z.string(),
     resolution: z.object({
+      summary: z.string().optional(),
       tests: z.string(),
       signal: z.string(),
     }).optional(),
   }),
-  riskFlag: z.enum(["cache-shortcut", "privacy-default", "merge-race", "runtime-drift", "none"]),
-  incidentFor: z.enum(["cache-shortcut", "privacy-default", "merge-race", "runtime-drift"]).optional(),
+  riskFlag: z.enum(["cache-shortcut", "privacy-default", "merge-race", "runtime-drift", "test-integrity", "contract-mismatch", "request-loop", "none"]),
+  incidentFor: z.enum(["cache-shortcut", "privacy-default", "merge-race", "runtime-drift", "test-integrity", "contract-mismatch", "request-loop"]).optional(),
+  blockedByIncident: z.enum(["cache-shortcut", "privacy-default", "merge-race", "runtime-drift", "test-integrity", "contract-mismatch", "request-loop"]).optional(),
 });
 
 export const UpgradeSchema = z.object({
@@ -56,6 +58,8 @@ export const UpgradeSchema = z.object({
   description: z.string(),
   cost: z.number().positive(),
   unlockAfter: z.number().int().nonnegative(),
+  requiresTicketId: z.string().optional(),
+  requiresResolvedIncident: z.enum(["cache-shortcut", "privacy-default", "merge-race", "runtime-drift", "test-integrity", "contract-mismatch", "request-loop"]).optional(),
   effect: z.enum(["briefing", "tests", "isolation", "observability", "handoff", "quota", "dashboard"]),
 });
 
@@ -83,6 +87,11 @@ export function validateContent(
   for (const ticket of parsedTickets) {
     for (const prerequisite of ticket.prerequisites) {
       if (!ticketIds.has(prerequisite)) throw new Error(`Unknown prerequisite ${prerequisite} for ${ticket.id}`);
+    }
+  }
+  for (const upgrade of parsedUpgrades) {
+    if (upgrade.requiresTicketId && !ticketIds.has(upgrade.requiresTicketId)) {
+      throw new Error(`Unknown required ticket ${upgrade.requiresTicketId} for ${upgrade.id}`);
     }
   }
 

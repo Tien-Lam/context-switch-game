@@ -162,14 +162,15 @@ select { width: 100%; border: 1px solid #30323d; background: #0f1015; border-rad
 .toast { position: fixed; right: 20px; bottom: 20px; z-index: 50; max-width: 420px; padding: 11px 13px; border: 1px solid #51478a; background: #1c1930; border-radius: 9px; box-shadow: 0 12px 50px #0008; display: flex; align-items: center; gap: 9px; font-size: 10px; }
 .toast svg { width: 15px; color: var(--purple-soft); }
 .toast button { border: 0; background: transparent; color: #aaa; font-size: 18px; }
-.modal-backdrop { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 20px; background: rgba(4,5,8,.84); backdrop-filter: blur(10px); }
-.ending-card { width: min(610px, 100%); border: 1px solid #5a4ba1; background: radial-gradient(circle at 50% 0, #2d2751, #111218 55%); border-radius: 15px; padding: 32px; box-shadow: 0 30px 90px #000; text-align: center; }
+.modal-backdrop { position: fixed; inset: 0; z-index: 100; display: grid; place-items: safe center; padding: 20px; background: rgba(4,5,8,.84); backdrop-filter: blur(10px); }
+.ending-card { width: min(610px, 100%); max-height: calc(100dvh - 40px); overflow-y: auto; border: 1px solid #5a4ba1; background: radial-gradient(circle at 50% 0, #2d2751, #111218 55%); border-radius: 15px; padding: 32px; box-shadow: 0 30px 90px #000; text-align: center; }
 .ending-card h2 { font-size: 28px; margin: 9px 0; }
 .ending-card > p { color: #aeb0bc; font-size: 12px; line-height: 1.7; }
 .score-grid { margin: 24px 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 9px; }
 .score-grid > div { padding: 12px; background: #111218; border: 1px solid #2c2e38; border-radius: 9px; display: grid; gap: 8px; }
 .score-grid span { color: var(--muted); text-transform: uppercase; font: 500 8px var(--mono); }
 .score-grid strong { font: 600 22px var(--mono); }
+.score-grid small { color: var(--muted); font-size: 10px; line-height: 1.45; }
 .ending-card .primary-button { margin: auto; padding: 0 20px; }
 .loading-screen { min-height: 100vh; display: grid; place-items: center; align-content: center; gap: 12px; color: var(--muted); }
 .loading-screen svg { color: var(--purple); animation: spin 1.5s linear infinite; }
