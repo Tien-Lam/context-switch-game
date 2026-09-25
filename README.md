@@ -1,5 +1,7 @@
 # Context Switch
 
+[Play the alpha on GitHub Pages](https://tien-lam.github.io/context-switch-game/).
+
 A local-first narrative idle-management game about supervising fictional coding agents under quota, context, review, and reliability pressure. The game is operated through two fictional coding-agent CLIs: read tickets, start provider-bound sessions, inspect reviews, switch models, and buy structural upgrades with typed or natural-language commands.
 
 Everything in the game is simulated. It does not call an AI service, connect to developer accounts, or access a real repository.
