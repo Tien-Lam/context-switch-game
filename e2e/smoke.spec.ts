@@ -2,9 +2,52 @@ import { expect, test } from "@playwright/test";
 import { createInitialState } from "../src/game/initialState";
 import { computeEnding } from "../src/game/engine";
 
+async function launchInTab(page: import("@playwright/test").Page, index: 1 | 2, command: "anthill" | "forge") {
+  await page.getByRole("tab", { name: new RegExp(`Terminal ${index}`) }).click();
+  const terminal = page.getByRole("textbox", { name: "Terminal command" });
+  await terminal.fill(command);
+  await terminal.press("Enter");
+  const provider = command === "anthill" ? "Anthill Code" : "OpenMind Forge";
+  await expect(page.getByRole("textbox", { name: `${provider} message` })).toBeVisible();
+}
+
+test("starts with two shells and launches either provider by command", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByRole("tab", { name: /Terminal 1/ })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /Terminal 2/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Agent", exact: true })).toBeDisabled();
+  await expect(page.getByRole("textbox", { name: "Terminal command" })).toBeVisible();
+  await launchInTab(page, 1, "anthill");
+  await page.getByRole("button", { name: "Terminal", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "Anthill Code command" })).toBeVisible();
+  await expect(page.locator(".terminal-output")).toContainText("Launching Anthill Code");
+  await launchInTab(page, 2, "forge");
+  await expect(page.getByRole("tab", { name: /Anthill Code/ })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /OpenMind Forge/ })).toBeVisible();
+});
+
+test("pre-launch shell inspects tickets but cannot assign work without an agent", async ({ page }) => {
+  await page.goto("/");
+  const terminal = page.getByRole("textbox", { name: "Terminal command" });
+  await terminal.fill("tickets list");
+  await terminal.press("Enter");
+  await expect(page.locator(".terminal-output")).toContainText("APP-101");
+  await terminal.fill("agents run APP-101");
+  await terminal.press("Enter");
+  await expect(page.locator(".terminal-output")).toContainText("launch an agent with `anthill` or `forge` first");
+  await expect(page.locator(".terminal-contextbar")).toContainText("0/1 slots");
+  await terminal.fill("forge");
+  await terminal.press("Enter");
+  await page.reload();
+  await expect(page.getByRole("textbox", { name: "OpenMind Forge message" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /Terminal 2/ })).toBeVisible();
+});
+
 test("uses both provider CLIs and completes a ticket from a natural-language prompt", async ({ page }) => {
   test.setTimeout(35_000);
   await page.goto("/");
+  await launchInTab(page, 1, "anthill");
+  await launchInTab(page, 2, "forge");
   await expect(page.getByRole("tab", { name: /Anthill Code/ })).toBeVisible();
   await expect(page.getByRole("tab", { name: /OpenMind Forge/ })).toBeVisible();
   const anthillTab = page.getByRole("tab", { name: /Anthill Code/ });
@@ -50,6 +93,7 @@ test("uses both provider CLIs and completes a ticket from a natural-language pro
 
 test("switches between natural agent chat and exact terminal tools", async ({ page }) => {
   await page.goto("/");
+  await launchInTab(page, 1, "anthill");
   const agent = page.getByRole("textbox", { name: "Anthill Code message" });
   await agent.fill("What should I work on next?");
   await agent.press("Enter");
@@ -81,6 +125,8 @@ test("shows the active model in its provider banner and refuses negated work int
     localStorage.setItem("context-switch-emergency-save", JSON.stringify({ version: 8, savedAt: Date.now(), game: savedGame }));
   }, game);
   await page.goto("/");
+  await launchInTab(page, 2, "forge");
+  await launchInTab(page, 1, "anthill");
   const openmindTab = page.getByRole("tab", { name: /OpenMind Forge/ });
   await openmindTab.click();
   const forge = page.getByRole("textbox", { name: "OpenMind Forge message" });
@@ -107,6 +153,7 @@ test("continues a completed demo save into the green-build chapter", async ({ pa
   }, game);
 
   await page.goto("/");
+  await launchInTab(page, 1, "anthill");
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(page.locator(".terminal-output")).toContainText("Objective: ship QA-401, then a safe first release.");
   await expect(page.locator(".terminal-output")).not.toContainText("work on APP-101");
@@ -126,6 +173,7 @@ test("refreshes a new conversation with the current chapter objective", async ({
   }, game);
 
   await page.goto("/");
+  await launchInTab(page, 1, "anthill");
   const command = page.getByRole("textbox", { name: "Anthill Code message" });
   await command.fill("/new");
   await command.press("Enter");
@@ -167,6 +215,7 @@ test("contains the gateway incident through the provider CLI", async ({ page }) 
   }, game);
 
   await page.goto("/");
+  await launchInTab(page, 1, "anthill");
   const command = page.getByRole("textbox", { name: "Anthill Code message" });
   await command.fill("incident status");
   await command.press("Enter");
@@ -192,6 +241,7 @@ test("prevents repeating an incident mitigation", async ({ page }) => {
   }, game);
 
   await page.goto("/");
+  await launchInTab(page, 1, "anthill");
   const command = page.getByRole("textbox", { name: "Anthill Code message" });
   await command.fill("incident mitigate rate-limit");
   await command.press("Enter");
@@ -215,6 +265,7 @@ test("plays the scaled-incident recovery through the final release in the browse
   }, game);
 
   await page.goto("/");
+  await launchInTab(page, 1, "anthill");
   const command = page.getByRole("textbox", { name: "Anthill Code message" });
   await command.fill("incident mitigate scale");
   await command.press("Enter");
@@ -244,6 +295,7 @@ test("plays the scaled-incident recovery through the final release in the browse
 
 test("keeps inspection intent read-only and exposes save import", async ({ page }) => {
   await page.goto("/");
+  await launchInTab(page, 1, "anthill");
   const command = page.getByRole("textbox", { name: "Anthill Code message" });
   await command.fill("please inspect APP-101");
   await command.press("Enter");
@@ -299,8 +351,8 @@ test("starting another shift resets terminal tabs and history", async ({ page })
   await page.goto("/");
   await expect(page.getByRole("dialog")).toBeVisible();
   await page.getByRole("button", { name: "Start another shift" }).click();
-  await expect(page.getByRole("tab", { name: /Anthill Code/ })).toBeVisible();
-  await expect(page.getByRole("tab", { name: /OpenMind Forge/ })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /Terminal 1/ })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /Terminal 2/ })).toBeVisible();
   await expect(page.getByRole("tab", { name: "old-operations" })).toHaveCount(0);
   await expect(page.getByText("old terminal history")).toHaveCount(0);
 });
@@ -314,6 +366,8 @@ test("unlocked multiplexer shows two independently usable provider panes", async
   }, game);
 
   await page.goto("/");
+  await launchInTab(page, 2, "forge");
+  await launchInTab(page, 1, "anthill");
   const anthill = page.getByRole("textbox", { name: "Anthill Code message" });
   await anthill.fill("pane split 2");
   await anthill.press("Enter");
@@ -338,12 +392,16 @@ test("same-provider tabs retain their own session status and event stream", asyn
     localStorage.setItem("context-switch-emergency-save", JSON.stringify({ version: 6, savedAt: Date.now(), game: savedGame }));
   }, game);
   await page.goto("/");
+  await launchInTab(page, 1, "anthill");
 
   const first = page.getByRole("textbox", { name: "Anthill Code message" });
   await first.fill("work on PERF-204");
   await first.press("Enter");
-  await first.fill("tab new anthill second");
+  await first.fill("tab new second");
   await first.press("Enter");
+  const newShell = page.getByRole("textbox", { name: "Terminal command" });
+  await newShell.fill("anthill");
+  await newShell.press("Enter");
   const second = page.getByRole("textbox", { name: "Anthill Code message" });
   await second.fill("work on PLAT-77");
   await second.press("Enter");
@@ -351,7 +409,7 @@ test("same-provider tabs retain their own session status and event stream", asyn
   await second.fill("/status");
   await second.press("Enter");
   await expect(page.getByText(/current task\s+PLAT-77/)).toBeVisible();
-  await page.getByRole("tab", { name: /Anthill Code/ }).click();
+  await page.getByRole("tab", { name: /Anthill Code/ }).first().click();
   await expect(page.locator(".terminal-output .line-event").filter({ hasText: "PLAT-77 → Ballad" })).toHaveCount(0);
   await first.fill("/status");
   await first.press("Enter");
@@ -366,6 +424,7 @@ test("importing a fresh save closes monitors that are no longer unlocked", async
     localStorage.setItem("context-switch-emergency-save", JSON.stringify({ version: 6, savedAt: Date.now(), game: savedGame }));
   }, advanced);
   await page.goto("/");
+  await launchInTab(page, 1, "anthill");
   const command = page.getByRole("textbox", { name: "Anthill Code message" });
   await command.fill("watch events");
   await command.press("Enter");
@@ -389,13 +448,11 @@ test("tab capacity reports an error without discarding existing history", async 
     localStorage.setItem("context-switch-emergency-save", JSON.stringify({ version: 6, savedAt: Date.now(), game: savedGame }));
   }, game);
   await page.goto("/");
+  await launchInTab(page, 1, "anthill");
   const command = page.getByRole("textbox", { name: "Anthill Code message" });
   await command.fill("tickets list");
   await command.press("Enter");
-  for (let index = 0; index < 7; index += 1) {
-    await command.fill(`tab new anthill extra-${index}`);
-    await command.press("Enter");
-  }
+  for (let index = 0; index < 7; index += 1) await page.getByRole("button", { name: "New terminal tab" }).click();
   await expect(page.getByRole("tab")).toHaveCount(8);
   await expect(page.getByText(/eight tabs are open/)).toBeVisible();
   await page.getByRole("tab", { name: /Anthill Code/ }).click();

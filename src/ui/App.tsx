@@ -375,30 +375,25 @@ function defaultModel(providerId: string) {
   return providerId === "openmind" ? "spark" : "ballad";
 }
 
-function createProviderTab(providerId: string, name?: string): TerminalTabState {
+const shellOnlyCommands = new Set(["help", "?", "tickets", "reviews", "review", "diff", "incident", "events", "upgrades", "agents", "speed", "tab", "pane", "watch", "dashboard", "save", "restart", "clear", "trace", "mux", "sound", "motion"]);
+const shellHelp = "TERMINAL · ~/delivery\n  anthill                    launch Anthill Code\n  forge                      launch OpenMind Forge\n  tickets list|read <KEY>    inspect work\n  reviews list|read <KEY>    inspect pending changes\n  agents list               inspect active work\n  upgrades list             inspect upgrades\n  help                      show this reference\n\nEach terminal tab can launch either agent. Agent chat opens in this tab; switch back to Terminal for exact tools.";
+
+function createTerminalTab(name?: string): TerminalTabState {
   const id = `term-${terminalTabId}`;
   terminalTabId += 1;
-  const modelId = defaultModel(providerId);
-  const provider = providerById.get(providerId)!;
   return {
     id,
-    name: name || provider.name,
+    name: name || `Terminal ${terminalTabId - 1}`,
     kind: "provider",
-    providerId,
-    modelId,
-    permissionMode: providerId === "openmind" ? "workspace-write" : "ask",
-    reasoning: "medium",
-    surface: "agent",
+    surface: "shell",
     input: "",
     commands: [],
     commandCursor: 0,
     shellInput: "",
-    shellHistory: [terminalLine("system", "OPERATOR TERMINAL · ~/delivery\nExact tools live here. Try `tickets list`, `reviews list`, or `help`.")],
+    shellHistory: [terminalLine("system", "~/delivery\nType `anthill` or `forge` to launch an agent. Use `help` for terminal tools.")],
     shellCommands: [],
     shellCommandCursor: 0,
-    history: [
-      terminalLine("system", providerBanner(providerId, modelId)),
-    ],
+    history: [],
   };
 }
 
@@ -409,40 +404,17 @@ function createMonitorTab(view: PaneMode): TerminalTabState {
 }
 
 function defaultTerminalTabs() {
-  return [createProviderTab("anthill"), createProviderTab("openmind")];
+  return [createTerminalTab("Terminal 1"), createTerminalTab("Terminal 2")];
 }
 
 function loadTerminalTabs() {
   try {
-    const parsed = JSON.parse(localStorage.getItem("context-switch-terminal-tabs-v2") ?? "null") as TerminalTabState[] | null;
+    const parsed = JSON.parse(localStorage.getItem("context-switch-terminal-tabs-v3") ?? "null") as TerminalTabState[] | null;
     if (parsed?.length && parsed.every((tab) => tab.id && tab.name && tab.kind && Array.isArray(tab.history))) {
       const highest = Math.max(...parsed.map((tab) => Number(tab.id.split("-")[1]) || 0));
       terminalTabId = highest + 1;
       terminalLineId = Math.max(terminalLineId, ...parsed.flatMap((tab) => [...tab.history, ...(tab.shellHistory ?? [])].map((line) => line.id || 0)));
-      return parsed.slice(0, 8).map((tab) => {
-        if (tab.kind === "provider" && !tab.surface && tab.providerId && tab.modelId) {
-          return {
-            ...tab,
-            surface: "agent" as const,
-            input: "",
-            history: [terminalLine("system", providerBanner(tab.providerId, tab.modelId))],
-            commands: [],
-            commandCursor: 0,
-            shellInput: tab.input,
-            shellHistory: tab.history,
-            shellCommands: tab.commands,
-            shellCommandCursor: tab.commandCursor,
-          };
-        }
-        return {
-          ...tab,
-          surface: tab.surface ?? "agent",
-          shellInput: tab.shellInput ?? "",
-          shellHistory: tab.shellHistory ?? [terminalLine("system", "OPERATOR TERMINAL · ~/delivery\nExact tools live here. Try `tickets list`, `reviews list`, or `help`.")],
-          shellCommands: tab.shellCommands ?? [],
-          shellCommandCursor: tab.shellCommandCursor ?? 0,
-        };
-      });
+      return parsed.slice(0, 8);
     }
   } catch {
     // A broken terminal layout should never block the game save.
@@ -520,13 +492,13 @@ export function App() {
       ? { ...tab, shellHistory: [...tab.shellHistory, ...lines].slice(-240) }
       : { ...tab, history: [...tab.history, ...lines].slice(-240) });
   };
-  const addTab = (providerId = currentTab.providerId ?? "anthill", name?: string) => {
+  const addTab = (name?: string) => {
     if (!multiTabUnlocked) {
       const target = currentTab.kind === "provider" ? activeTabId : tabs.find((tab) => tab.kind === "provider")?.id;
-      if (target) appendLines(target, [terminalLine("error", "error: extra provider sessions unlock after the first shipped ticket")]);
+      if (target) appendLines(target, [terminalLine("error", "error: extra terminal tabs unlock after the first shipped ticket")]);
       return;
     }
-    const next = createProviderTab(providerId, name);
+    const next = createTerminalTab(name || `Terminal ${tabs.length + 1}`);
     if (tabs.length >= 8) {
       appendLines(activeTabId, [terminalLine("error", "error: eight tabs are open; close one before attaching another")]);
       return;
@@ -644,7 +616,7 @@ export function App() {
     }));
     if (effect.type === "permissions") updateTab(tabId, (tab) => ({ ...tab, permissionMode: effect.mode }));
     if (effect.type === "reasoning") updateTab(tabId, (tab) => ({ ...tab, reasoning: effect.mode }));
-    if (effect.type === "tab-new") addTab(effect.providerId, effect.name);
+    if (effect.type === "tab-new") addTab(effect.name);
     if (effect.type === "tab-close") closeTab(tabId);
     if (effect.type === "tab-rename") updateTab(tabId, (tab) => ({ ...tab, name: effect.name }));
     if (effect.type === "open-view") openView(effect.mode);
@@ -672,13 +644,43 @@ export function App() {
     if (!command) return;
     if (soundEnabled) activateAudio();
     const tab = tabs.find((candidate) => candidate.id === tabId);
-    if (!tab || tab.kind !== "provider" || !tab.providerId) return;
+    if (!tab || tab.kind !== "provider") return;
     const surface = requestedSurface ?? tab.surface;
     updateTab(tabId, (current) => surface === "shell"
       ? { ...current, shellInput: "", shellCommands: [...current.shellCommands, command].slice(-60), shellCommandCursor: current.shellCommands.length + 1 }
       : { ...current, input: "", commands: [...current.commands, command].slice(-60), commandCursor: current.commands.length + 1 });
     appendLines(tabId, [terminalLine("command", command)], surface);
-    const context = { providerId: tab.providerId, modelId: tab.modelId, permissionMode: tab.permissionMode, reasoning: tab.reasoning, sessionId: tab.boundSessionId ?? null };
+    if (!tab.providerId) {
+      const launchId = command.toLowerCase() === "anthill" ? "anthill" : command.toLowerCase() === "forge" ? "openmind" : undefined;
+      if (launchId) {
+        const modelId = defaultModel(launchId);
+        updateTab(tabId, (current) => ({
+          ...current,
+          name: providerById.get(launchId)!.name,
+          providerId: launchId,
+          modelId,
+          permissionMode: launchId === "openmind" ? "workspace-write" : "ask",
+          reasoning: "medium",
+          surface: "agent",
+          history: [terminalLine("system", providerBanner(launchId, modelId))],
+          input: "",
+          commands: [],
+          commandCursor: 0,
+          shellHistory: [...current.shellHistory, terminalLine("success", `Launching ${providerById.get(launchId)!.name}…`)].slice(-240),
+        }));
+        return;
+      }
+      const root = command.split(/\s+/)[0].replace(/^\//, "").toLowerCase();
+      if (root === "help" || root === "?") {
+        appendLines(tabId, [terminalLine("output", shellHelp)], "shell");
+        return;
+      }
+      if (!shellOnlyCommands.has(root) || (root === "agents" && !/^agents(?:\s+list)?$/i.test(command))) {
+        appendLines(tabId, [terminalLine("error", "error: launch an agent with `anthill` or `forge` first; run `help` for terminal tools")], "shell");
+        return;
+      }
+    }
+    const context = { providerId: tab.providerId ?? "anthill", modelId: tab.modelId, permissionMode: tab.permissionMode, reasoning: tab.reasoning, sessionId: tab.boundSessionId ?? null };
     const result = surface === "shell" ? evaluateCommand(command, useGameStore.getState().game, context, true) : evaluateAgentMessage(command, useGameStore.getState().game, context);
     if (result.messages.length) appendLines(tabId, result.messages.map((message) => terminalLine(message.kind, message.text)), surface);
     if (result.effect) await applyEffect(result.effect, tabId, surface);
@@ -707,7 +709,7 @@ export function App() {
     document.addEventListener("visibilitychange", onVisibility);
     return () => { window.clearInterval(interval); window.clearInterval(autosave); document.removeEventListener("visibilitychange", onVisibility); };
   }, [hydrate, hydrated, persist, pulse, reconcile]);
-  useEffect(() => { localStorage.setItem("context-switch-terminal-tabs-v2", JSON.stringify(tabs)); }, [tabs]);
+  useEffect(() => { localStorage.setItem("context-switch-terminal-tabs-v3", JSON.stringify(tabs)); }, [tabs]);
   useEffect(() => {
     if (paneTabId) localStorage.setItem("context-switch-pane-tab-v1", paneTabId);
     else localStorage.removeItem("context-switch-pane-tab-v1");
@@ -743,7 +745,10 @@ export function App() {
         ? tabs.find((tab) => tab.kind === "provider" && tab.providerId === event.providerId)?.id
         : undefined;
       const target = boundTarget ?? providerTarget ?? (currentTab.kind === "provider" ? activeTabId : tabs.find((tab) => tab.kind === "provider")?.id);
-      if (target) appendLines(target, [terminalLine("event", `[${event.tone}] ${event.title}\n${event.message}`)], "agent");
+      if (target) {
+        const destination = tabs.find((tab) => tab.id === target);
+        appendLines(target, [terminalLine("event", `[${event.tone}] ${event.title}\n${event.message}`)], destination?.providerId ? "agent" : "shell");
+      }
     }
   }, [game.events, soundEnabled]);
   useEffect(() => {
@@ -800,28 +805,28 @@ export function App() {
     : undefined;
   const contextRemaining = Math.round(currentSession?.context ?? 100);
   const quotaRemaining = currentTab.providerId ? Math.round(game.providerQuota[currentTab.providerId] ?? 0) : 0;
-  const shellCommand = currentTab.kind === "monitor" ? `watch ${currentTab.view}` : currentTab.surface === "shell" ? "operator-shell" : currentTab.providerId === "openmind" ? "forge" : "anthill";
+  const shellCommand = currentTab.kind === "monitor" ? `watch ${currentTab.view}` : !currentTab.providerId ? "~/delivery" : currentTab.surface === "shell" ? "operator-shell" : currentTab.providerId === "openmind" ? "forge" : "anthill";
   const renderPane = (tab: TerminalTabState, secondary = false) => {
     const provider = tab.providerId ? providerById.get(tab.providerId) : undefined;
     const shell = tab.surface === "shell";
     const visibleHistory = shell ? tab.shellHistory : tab.history;
     return (
-      <div className={`terminal-pane ${secondary ? "secondary-pane" : "primary-pane"} ${tab.kind === "monitor" ? "tool-view" : `provider-${tab.providerId}`}`} key={tab.id}>
+      <div className={`terminal-pane ${secondary ? "secondary-pane" : "primary-pane"} ${tab.kind === "monitor" ? "tool-view" : tab.providerId ? `provider-${tab.providerId}` : "provider-unlaunched"}`} key={tab.id}>
         {secondary && <div className="pane-heading"><span>{tab.name} · LIVE</span><div><button onClick={() => { setActiveTabId(tab.id); setPaneTabId(null); }}>Fill window</button><button onClick={() => setPaneTabId(null)} aria-label="Close second pane">×</button></div></div>}
         {tab.kind === "provider" ? (
-          <section className="terminal-shell" aria-label={`${provider?.name} session`}>
-            <div className="surface-switch" role="group" aria-label={`${provider?.name} surface`}>
-              <button aria-pressed={!shell} className={!shell ? "active" : ""} onClick={() => updateTab(tab.id, (current) => ({ ...current, surface: "agent" }))}>Agent</button>
+          <section className="terminal-shell" aria-label={`${provider?.name ?? tab.name} session`}>
+            <div className="surface-switch" role="group" aria-label={`${provider?.name ?? tab.name} surface`}>
+              <button disabled={!tab.providerId} aria-pressed={!shell} className={!shell ? "active" : ""} onClick={() => updateTab(tab.id, (current) => ({ ...current, surface: "agent" }))}>Agent</button>
               <button aria-pressed={shell} className={shell ? "active" : ""} onClick={() => updateTab(tab.id, (current) => ({ ...current, surface: "shell" }))}>Terminal</button>
-              <span>{shell ? "Exact tool commands" : "Ask in your own words"}</span>
+              <span>{!tab.providerId ? "Launch an agent by command" : shell ? "Exact tool commands" : "Ask in your own words"}</span>
             </div>
             <div className="terminal-output" ref={secondary ? secondaryOutputRef : outputRef} role="log" aria-live="polite">
               {visibleHistory.map((line) => <div className={`terminal-line line-${line.kind}`} key={line.id}>{line.kind === "command" && <span className="line-prompt">{shell ? "$" : tab.providerId === "openmind" ? "›" : ">"}</span>}<pre>{line.text}</pre></div>)}
-              <div className={`command-launchers ${shell ? "shell-suggestions" : "agent-suggestions"}`} aria-label={`${provider?.name} suggested ${shell ? "commands" : "prompts"}`}>{(shell ? commandSuggestions(tab.providerId ?? "anthill", game) : agentSuggestions(tab.providerId ?? "anthill", game)).map((suggestion) => <button key={suggestion} onClick={() => void execute(suggestion, tab.id, tab.surface)}>{suggestion}</button>)}</div>
+              <div className={`command-launchers ${shell ? "shell-suggestions" : "agent-suggestions"}`} aria-label={`${provider?.name ?? tab.name} suggested ${shell ? "commands" : "prompts"}`}>{(!tab.providerId ? ["anthill", "forge", "tickets list", "help"] : shell ? commandSuggestions(tab.providerId, game) : agentSuggestions(tab.providerId, game)).map((suggestion) => <button key={suggestion} onClick={() => void execute(suggestion, tab.id, tab.surface)}>{suggestion}</button>)}</div>
             </div>
-            <div className={`terminal-prompt prompt-${tab.providerId}`}>
+            <div className={`terminal-prompt prompt-${tab.providerId ?? "terminal"}`}>
               <span className="provider-chevron">{shell ? "$" : tab.providerId === "openmind" ? "›" : ">"}</span>
-              <input key={tab.surface} autoFocus={!secondary} aria-label={`${provider?.name} ${shell ? "command" : "message"}`} placeholder={shell ? "Enter a tool command…" : "Ask your agent anything about the work…"} autoComplete="off" spellCheck={false} value={shell ? tab.shellInput : tab.input} onChange={(event) => updateTab(tab.id, (current) => shell ? { ...current, shellInput: event.target.value } : { ...current, input: event.target.value })} onKeyDown={(event) => onInputKey(event, tab)} />
+              <input key={tab.surface} autoFocus={!secondary} aria-label={provider ? `${provider.name} ${shell ? "command" : "message"}` : "Terminal command"} placeholder={!tab.providerId ? "Type anthill or forge to launch an agent…" : shell ? "Enter a tool command…" : "Ask your agent anything about the work…"} autoComplete="off" spellCheck={false} value={shell ? tab.shellInput : tab.input} onChange={(event) => updateTab(tab.id, (current) => shell ? { ...current, shellInput: event.target.value } : { ...current, input: event.target.value })} onKeyDown={(event) => onInputKey(event, tab)} />
             </div>
           </section>
         ) : tab.view ? <MonitorPane mode={tab.view} game={game} /> : null}
@@ -847,7 +852,7 @@ export function App() {
               </div>
             ))}
           </div>
-          <button className="terminal-tab-add" aria-label={multiTabUnlocked ? "New provider session" : "Extra sessions locked"} onClick={() => addTab()} title={multiTabUnlocked ? "New provider session · Alt+T" : "Ship one ticket to unlock extra sessions"}><Plus /></button>
+          <button className="terminal-tab-add" aria-label={multiTabUnlocked ? "New terminal tab" : "Extra sessions locked"} onClick={() => addTab()} title={multiTabUnlocked ? "New terminal tab · Alt+T" : "Ship one ticket to unlock extra sessions"}><Plus /></button>
         </nav>
 
         <div className="terminal-contextbar">
@@ -862,7 +867,7 @@ export function App() {
 
         <footer className={`mux-statusbar status-${currentTab.providerId ?? currentTab.kind}`}>
           <div className="mux-session-list">{tabs.map((tab, index) => <button className={tab.id === activeTabId ? "active" : ""} onClick={() => setActiveTabId(tab.id)} key={tab.id}>{index + 1}:{tab.name}{tab.id === activeTabId ? "*" : ""}</button>)}</div>
-          <div>{currentTab.kind === "provider" ? <><span>{currentSession?.ticketId ? `${ticketById.get(currentSession.ticketId)?.key} ${currentSession.status}` : "idle"} · {currentModel?.name} {currentTab.providerId === "openmind" ? currentTab.reasoning : currentTab.permissionMode}</span><span>{quotaRemaining} quota</span><span>{contextRemaining}% context</span></> : <span>{operationsUnlocked ? `full-window:${currentTab.view}` : "operations locked"}</span>}{secondaryTab && <span>split:{secondaryTab.name}</span>}<span>ctrl-tab next</span></div>
+          <div>{currentTab.kind === "provider" ? currentTab.providerId ? <><span>{currentSession?.ticketId ? `${ticketById.get(currentSession.ticketId)?.key} ${currentSession.status}` : "idle"} · {currentModel?.name} {currentTab.providerId === "openmind" ? currentTab.reasoning : currentTab.permissionMode}</span><span>{quotaRemaining} quota</span><span>{contextRemaining}% context</span></> : <span>shell · type anthill or forge</span> : <span>{operationsUnlocked ? `full-window:${currentTab.view}` : "operations locked"}</span>}{secondaryTab && <span>split:{secondaryTab.name}</span>}<span>ctrl-tab next</span></div>
         </footer>
       </section>
 

@@ -315,6 +315,7 @@ select { width: 100%; border: 1px solid #30323d; background: #0f1015; border-rad
 .surface-switch button { border: 1px solid transparent; border-radius: 4px; background: transparent; color: #858995; padding: 0 11px; font: inherit; cursor: pointer; }
 .surface-switch button.active { border-color: #45405b; background: #242030; color: #e0dafa; }
 .surface-switch button:hover { color: #f0edf8; }
+.surface-switch button:disabled { color: #525660; cursor: not-allowed; }
 .surface-switch span { align-self: center; margin-left: auto; color: #727783; white-space: nowrap; }
 .terminal-pane.provider-anthill .terminal-shell { background: radial-gradient(circle at 16% 10%, rgba(212,155,120,.055), transparent 30rem), #080a0d; }
 .terminal-pane.provider-openmind .terminal-shell { background: radial-gradient(circle at 84% 10%, rgba(114,215,195,.05), transparent 30rem), #080a0d; }

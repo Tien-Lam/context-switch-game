@@ -27,7 +27,7 @@ export type CliEffect =
   | { type: "model"; modelId: string }
   | { type: "permissions"; mode: PermissionMode }
   | { type: "reasoning"; mode: ReasoningMode }
-  | { type: "tab-new"; providerId?: string; name?: string }
+  | { type: "tab-new"; name?: string }
   | { type: "tab-close" }
   | { type: "tab-rename"; name: string }
   | { type: "open-view"; mode: PaneMode }
@@ -143,7 +143,7 @@ function providerHelp(state: GameState, context: CliContext) {
     "  incident mitigate <ACTION> scale | rate-limit | rollback",
     "  events [N]                  tail the activity stream",
     "  speed <1|4|12>              set simulation speed",
-    state.completedTicketIds.length >= 1 ? "  tab new [PROVIDER] [NAME]   attach another provider session" : "  [locked] extra sessions · ship 1 ticket",
+    state.completedTicketIds.length >= 1 ? "  tab new [NAME]              open a shell; type anthill or forge to launch" : "  [locked] extra terminal tabs · ship 1 ticket",
     state.completedTicketIds.length >= 3 ? "  watch <TYPE>                open a full-window operations tab" : "  [locked] operations views · ship 3 tickets",
     state.completedTicketIds.length >= 3 ? "  pane split <VIEW|TAB#>     show a second live terminal pane" : "  [locked] split panes · ship 3 tickets",
     state.completedTicketIds.length >= 3 ? "  pane swap|close             manage the split layout" : "",
@@ -355,7 +355,7 @@ function muxStatus(state: GameState) {
     "  [ready]  OpenMind Forge session     tab 2 · full window",
     `  ${shipped >= 1 ? "[ready]" : "[locked]"} parallel execution          ${shipped >= 1 ? "2 agent slots" : "ship 1 ticket"}`,
     `  ${shipped >= 3 ? "[ready]" : "[locked]"} third execution slot        ${shipped >= 3 ? "3 agent slots" : "ship 3 tickets"}`,
-    `  ${shipped >= 1 ? "[ready]" : "[locked]"} extra provider sessions     ${shipped >= 1 ? "tab new anthill|openmind" : "ship 1 ticket"}`,
+    `  ${shipped >= 1 ? "[ready]" : "[locked]"} extra terminal tabs         ${shipped >= 1 ? "tab new, then anthill|forge" : "ship 1 ticket"}`,
     `  ${shipped >= 2 ? "[ready]" : "[locked]"} named workspaces            ${shipped >= 2 ? "tab rename" : "ship 2 tickets"}`,
     `  ${shipped >= 3 ? "[ready]" : "[locked]"} full-window operations      ${shipped >= 3 ? "watch agents|reviews|quota|events" : "ship 3 tickets"}`,
     `  ${shipped >= 3 ? "[ready]" : "[locked]"} split panes                 ${shipped >= 3 ? "pane split <VIEW|TAB#> · pane swap|close" : "ship 3 tickets"}`,
@@ -626,11 +626,8 @@ export function evaluateCommand(raw: string, state: GameState, suppliedContext: 
 
   if (command === "tab") {
     if (subcommand === "new") {
-      if (state.completedTicketIds.length < 1) return error("extra provider sessions unlock after the first shipped ticket");
-      const requestedProvider = tokens[2]?.toLowerCase();
-      const providerId = requestedProvider === "anthill" || requestedProvider === "openmind" ? requestedProvider : context.providerId;
-      const nameStart = requestedProvider === providerId ? 3 : 2;
-      return { messages: [], effect: { type: "tab-new", providerId, name: tokens.slice(nameStart).join(" ") || undefined } };
+      if (state.completedTicketIds.length < 1) return error("extra terminal tabs unlock after the first shipped ticket");
+      return { messages: [], effect: { type: "tab-new", name: tokens.slice(2).join(" ") || undefined } };
     }
     if (subcommand === "close") return { messages: [], effect: { type: "tab-close" } };
     if (subcommand === "rename") {
