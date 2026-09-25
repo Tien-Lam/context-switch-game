@@ -106,6 +106,9 @@ function providerHelp(state: GameState, context: CliContext) {
   const isAnthill = context.providerId === "anthill";
   const dashboard = state.purchasedUpgradeIds.includes("terminal-dashboard");
   const shared = [
+    "  Agent chat accepts ordinary requests; the Terminal surface runs exact tools.",
+    "  For example: ‘Please handle the deployment banner’ or ‘Is this review safe?’",
+    "",
     "  /help                      show commands",
     "  /status                    session, model, permissions, and work",
     "  /model [ID]                list or switch this provider's model",
@@ -114,7 +117,8 @@ function providerHelp(state: GameState, context: CliContext) {
     "                             plan spends 5 quota to clarify the next assignment",
     "  /review [KEY]              inspect the review queue or a diff",
     "  /new                       start a fresh conversation",
-    "  work on <KEY>              assign a ticket using this session's model",
+    "  agents run <KEY>          assign work from Terminal",
+    "  agents list|compact       inspect or compact orchestration slots",
     "  tickets list|read <KEY>    inspect the authored backlog",
   ];
   const specific = isAnthill
@@ -146,6 +150,18 @@ function providerHelp(state: GameState, context: CliContext) {
     dashboard ? "  dashboard                  open the full-window live dashboard" : "  [upgrade] dashboard · buy terminal-dashboard",
     "  mux | trace | sound on|off | motion reduce|auto",
     "  save export|import | restart --confirm | clear",
+  ].join("\n");
+}
+
+function agentHelp(state: GameState, context: CliContext) {
+  const next = availableTickets(state)[0];
+  return [
+    `${providerById.get(context.providerId)?.name ?? "AGENT"} · CONVERSATION`,
+    "Tell me what you need in ordinary language. You do not need a ticket key or command syntax.",
+    next ? `Try: “Could you take the next ticket?” or “What is ${next.key} about?”` : "Ask about pending reviews or the current work.",
+    "Ask what changed or whether a review is safe before you approve it.",
+    "Use /status, /model, /permissions, or /new for session controls.",
+    "Switch to Terminal for exact backlog, review, incident, and multiplexer tools.",
   ].join("\n");
 }
 
@@ -396,33 +412,79 @@ function runTicket(state: GameState, context: CliContext, reference?: string, to
   } satisfies CliResult;
 }
 
-function naturalLanguagePrompt(raw: string, state: GameState, context: CliContext) {
-  const reference = raw.match(/\b[A-Z]{2,10}-\d+\b/i)?.[0];
-  if (!reference) {
-    const provider = providerById.get(context.providerId);
-    const next = availableTickets(state).find((ticket) => !ticket.incidentFor && ticket.kind !== "finale");
-    const guidance = next
-      ? `The next ready ticket is ${next.key}; try “work on ${next.key}”.`
-      : "List the backlog to choose an available ticket.";
-    return { messages: [output(`${provider?.name ?? "Agent"}: include a ticket key in the task. ${guidance}`, "muted")] };
-  }
+function naturalLanguagePrompt(raw: string, state: GameState, context: CliContext): CliResult {
+  const explicit = raw.match(/\b[A-Z]{2,10}-\d+\b/i)?.[0];
+  const candidateTickets = visibleTickets(state);
+  const words = new Set((raw.toLowerCase().match(/[a-z]{4,}/g) ?? []).filter((word) => !["this", "that", "next", "first", "ticket", "work", "with", "from", "please", "could", "would", "should", "about", "change", "review"].includes(word)));
+  const titleMatches = candidateTickets.map((ticket) => ({
+    ticket,
+    score: (ticket.title.toLowerCase().match(/[a-z]{4,}/g) ?? []).filter((word) => words.has(word)).length,
+  })).filter((match) => match.score > 0).sort((a, b) => b.score - a.score);
+  const titleMatch = titleMatches[0] && titleMatches[0].score > (titleMatches[1]?.score ?? 0) ? titleMatches[0].ticket : undefined;
+  const ticket = findTicket(explicit) ?? titleMatch;
+  const reference = ticket?.key ?? explicit;
+  const ready = availableTickets(state);
+  const pending = ticket ? state.reviews.find((review) => review.ticketId === ticket.id) : state.reviews.length === 1 ? state.reviews[0] : undefined;
+  const pendingKey = pending ? ticketById.get(pending.ticketId)?.key : undefined;
+  const inquiry = /^\s*(?:what|which|how|why|when|where|should\b|is\b|are\b|do\s+(?:I|we)\b|tell\s+me\b|show\s+me\b)/i.test(raw);
   const negatedWork = /\b(?:do\s+not|don['’]t|dont|never|avoid|should\s+not|shouldn['’]t|will\s+not|won['’]t)\s+(?:(?:want|need|plan|intend)\s+(?:(?:you|me|us)\s+)?(?:to\s+)?)?(?:please\s+)?(?:(?:you|me|us)\s+)?(?:work(?:ing)?|implement|start|begin|assign|touch|change|fix|ship|run|do(?:\s+(?:any\s+)?work)?)\b|\b(?:would\s+rather\s+not|rather\s+not)\s+(?:work(?:ing)?|implement|start|assign|touch|change|fix|ship|run)\b|\b(?:hold\s+off\s+on|refrain\s+from)\s+(?:work(?:ing)?|implement|starting|assigning|touching|changing|fixing|shipping|running)\b|\bdelay\s+(?:the\s+)?(?:work|working|implementation|start(?:ing)?|assignment|change|fix|ship(?:ping)?|run(?:ning)?)\b|\bpostpone\s+(?:the\s+)?(?:work|working|implementation|start(?:ing)?|assignment|change|fix|ship(?:ping)?|run(?:ning)?)\b|\bwait\s+(?:to\s+)?(?:work|start|begin|assign|implement|run)\b|\b(?:cannot|can\s+not|can['’]t|unable\s+to)\s+(?:work|start|begin|assign|implement|run)\b|\bnot\s+ready\s+to\s+(?:work|start|begin|assign|implement|run)\b|\bnot\s+yet\b/i;
-  if (negatedWork.test(raw)) {
-    return { messages: [output(`No work started for ${reference}. Use "work on ${reference}" when you want to assign it.`, "muted")] };
+  if (negatedWork.test(raw) || /\b(?:hold\s+off|refrain|delay|postpone|wait|not\s+ready|cannot|can['’]t)\b/i.test(raw)) {
+    return { messages: [output(`No work started${reference ? ` for ${reference}` : ""}. Tell me when you're ready to pick it up.`, "muted")] };
   }
-  if (/\b(review|inspect|diff)\b/i.test(raw)) {
-    return readReview(state, reference);
+  const reviewQuestion = /\b(reviews?|inspect|diff|changes?|tests?|warning|approve|merge|ship|safe)\b/i.test(raw);
+  const reviewDecision = !inquiry && /^\s*(?:(?:please|let'?s)\s+)?(?:approve|merge|accept|ship|revise|request changes|escalate)\b/i.exec(raw)?.[0].toLowerCase();
+  if (reviewDecision && (pending || reference)) {
+    if (pending) {
+      const decision: ReviewDecision = /revise|request changes/.test(reviewDecision) ? "revise" : /escalate/.test(reviewDecision) ? "escalate" : "approve";
+      return { messages: [output(`${decision === "approve" ? "Approving" : decision === "revise" ? "Requesting changes for" : "Escalating"} ${pendingKey}.`, "muted")], effect: { type: "review", reviewId: pending.id, decision } };
+    }
+    if (!/ship/.test(reviewDecision)) return { messages: [output(`There is no pending review for ${reference}.`, "muted")] };
   }
-  const affirmativeWork = /^\s*(?:please\s+)?(?:work\s+on|implement|start|begin|assign|take|touch|change|fix|ship|run)\b/i.test(raw)
-    || /\b(?:can|could|would)\s+you\s+(?:please\s+)?(?:work\s+on|implement|start|begin|assign|take|touch|change|fix|ship|run)\b/i.test(raw)
-    || /\b(?:I|we)\s+(?:want|need|would\s+like)\s+you\s+to\s+(?:work\s+on|implement|start|begin|assign|take|touch|change|fix|ship|run)\b/i.test(raw);
-  if (!affirmativeWork) {
-    return { messages: [output(`No work started for ${reference}. Use "work on ${reference}" when you want to assign it.`, "muted")] };
+  if (reviewQuestion && (pending || reference)) {
+    if (pendingKey) return readReview(state, pendingKey);
+    if (/\b(review|inspect|diff|approve|merge)\b/i.test(raw)) return readReview(state, reference);
   }
-  return runTicket(state, context, reference, [], raw);
+  if (reviewQuestion && !reference && state.reviews.length > 1) return { messages: [output(listReviews(state))] };
+  const containment = /^\s*(?:(?:please|let'?s)\s+)?(?:roll\s*back|rate[-\s]?limit|scale)\b/i.exec(raw)?.[0];
+  if (containment) {
+    const action: IncidentMitigation = /roll\s*back/i.test(containment) ? "rollback" : /rate[-\s]?limit/i.test(containment) ? "rate-limit" : "scale";
+    const result = evaluateCommand(`incident mitigate ${action}`, state, context, true);
+    return result.effect ? { ...result, messages: [output(`${action === "rollback" ? "Rolling back the retry feature" : action === "rate-limit" ? "Rate limiting the gateway" : "Scaling gateway capacity"}.`, "muted")] } : result;
+  }
+  const titleVerb = ticket?.title.split(" ")[0];
+  const titleAction = titleVerb && new RegExp(`^\\s*(?:(?:please|let's)\\s+|(?:can|could|would)\\s+you\\s+)?${titleVerb}\\b`, "i").test(raw);
+  const affirmativeWork = !inquiry && (titleAction || /^\s*(?:please\s+)?(?:work\s+on|implement|start|begin|assign|take(?:\s+care\s+of)?|tackle|pick\s+up|handle|build|fix|ship|run|do)\b/i.test(raw)
+    || /^\s*(?:can|could|would)\s+you\s+(?:please\s+)?(?:work\s+on|implement|start|begin|assign|take(?:\s+care\s+of)?|tackle|pick\s+up|handle|build|fix|ship|run|do)\b/i.test(raw)
+    || /\b(?:I|we)\s+(?:want|need|would\s+like)\s+you\s+to\s+(?:work\s+on|implement|start|begin|assign|take(?:\s+care\s+of)?|tackle|pick\s+up|handle|build|fix|ship|run|do)\b/i.test(raw)
+    || /^\s*let'?s\s+(?:work\s+on|implement|start|begin|take|tackle|pick\s+up|handle|build|fix|ship|do)\b/i.test(raw));
+  if (affirmativeWork) {
+    const selected = ticket ?? (/\b(next|first|ready|another|one)\b/i.test(raw) || ready.length === 1 ? ready[0] : undefined);
+    if (selected) return runTicket(state, context, selected.key, [], raw);
+    return { messages: [output(`I can take a ticket. The ready options are ${ready.map((item) => `${item.key} (${item.title})`).join(", ") || "currently blocked"}. Which one should I pick up?`, "muted")] };
+  }
+  const describedTicket = ticket ?? (ready.length === 1 && /\b(?:ticket|task|brief|first one|next one|this one|that one)\b/i.test(raw) ? ready[0] : undefined);
+  if (describedTicket && /\b(ticket|brief|details?|requirement|explain|describe|tell|about|risk|risky|unsafe|summary|read|look|show)\b/i.test(raw)) return readTicket(state, describedTicket.key, context);
+  if (/\b(backlog|tickets|what(?:'s| is)? next|what should (?:I|we) (?:do|work on)|ready to work)\b/i.test(raw)) return { messages: [output(listTickets(state, context))] };
+  if (/\b(gateway|incident|request loop|contain)\b/i.test(raw)) return { messages: [output(incidentStatus(state))] };
+  if (/\b(quota|usage|limit|reset)\b/i.test(raw)) return { messages: [output(quota(state, context))] };
+  if (/\b(models?|reasoning)\b/i.test(raw)) return { messages: [output(listModels(state, context))] };
+  if (/\b(status|progress|working|doing)\b/i.test(raw)) return { messages: [output(status(state, context))] };
+  const next = ready.find((item) => !item.incidentFor && item.kind !== "finale") ?? ready[0];
+  return { messages: [output(`${providerById.get(context.providerId)?.name ?? "Agent"}: ${reference ? `I can look into ${reference} or take it on when you ask. ` : "Tell me what you want to work on in your own words. "}${next ? `The next ready ticket is ${next.key} (${next.title}).` : "There is no ready ticket right now; check the review queue."}`, "muted")] };
 }
 
-export function evaluateCommand(raw: string, state: GameState, suppliedContext: CliContext = defaultContext): CliResult {
+const terminalCommands = new Set(["help", "?", "status", "clear", "new", "mux", "trace", "sound", "motion", "models", "model", "quota", "usage", "cost", "context", "permissions", "reasoning", "init", "incident", "tickets", "agents", "compact", "review", "diff", "reviews", "upgrades", "events", "speed", "tab", "pane", "watch", "dashboard", "save", "restart"]);
+
+export function evaluateAgentMessage(raw: string, state: GameState, context: CliContext = defaultContext): CliResult {
+  const trimmed = raw.trim();
+  const first = trimmed.split(/\s+/)[0]?.toLowerCase();
+  if (trimmed.startsWith("/") || (terminalCommands.has(first) && !/[?]|\b(?:please|me|you|the|this|that|what|which|how|why|should|can|could|would|about)\b/i.test(trimmed))) {
+    return evaluateCommand(trimmed, state, context);
+  }
+  return naturalLanguagePrompt(trimmed, state, { ...defaultContext, ...context });
+}
+
+export function evaluateCommand(raw: string, state: GameState, suppliedContext: CliContext = defaultContext, strict = false): CliResult {
   const context = { ...defaultContext, ...suppliedContext };
   const tokens = raw.trim().split(/\s+/).filter(Boolean);
   const first = tokens[0]?.toLowerCase();
@@ -431,7 +493,7 @@ export function evaluateCommand(raw: string, state: GameState, suppliedContext: 
   const subcommand = tokens[1]?.toLowerCase();
   if (!command) return { messages: [] };
 
-  if (command === "help" || command === "?") return { messages: [output(providerHelp(state, context))] };
+  if (command === "help" || command === "?") return { messages: [output(strict ? providerHelp(state, context) : agentHelp(state, context))] };
   if (command === "status") return { messages: [output(status(state, context))] };
   if (command === "clear") return { messages: [], effect: { type: "clear" } };
   if (command === "new") return { messages: [], effect: { type: "new-session" } };
@@ -616,15 +678,15 @@ export function evaluateCommand(raw: string, state: GameState, suppliedContext: 
     return { messages: [output("starting a clean shift…", "muted")], effect: { type: "restart" } };
   }
 
-  if (!slashCommand) return naturalLanguagePrompt(raw, state, context);
-  return error(`command not found: /${command}; run \`/help\``);
+  if (!slashCommand && !strict) return naturalLanguagePrompt(raw, state, context);
+  return error(`command not found: ${slashCommand ? `/${command}` : command}; run \`help\``);
 }
 
 export function commandSuggestions(providerId: string, state?: GameState) {
   if (!state) {
     return providerId === "openmind"
-      ? ["/help", "/status", "/model", "/reasoning high", "implement APP-101"]
-      : ["/help", "/status", "/model", "/context", "work on APP-101"];
+      ? ["/help", "/status", "/model", "/reasoning high", "agents run APP-101"]
+      : ["/help", "/status", "/model", "/context", "agents run APP-101"];
   }
 
   if (["active", "scaled"].includes(state.incidentResponse)) return ["incident status", "incident mitigate rollback", "incident mitigate rate-limit", "tickets list", "events 5"];
@@ -635,6 +697,18 @@ export function commandSuggestions(providerId: string, state?: GameState) {
   const nextTicket = availableTickets(state)[0];
   if (reviewTicket) return ["/status", `reviews read ${reviewTicket.key}`, "reviews list", "events 5", "/usage"];
   if (session) return ["/status", "/context", ...(session.status === "awaiting-review" ? ["reviews list"] : ["/compact"]), "events 5", "/usage"];
-  if (nextTicket) return ["/status", "tickets list", `tickets read ${nextTicket.key}`, `${providerId === "openmind" ? "implement" : "work on"} ${nextTicket.key}`, "/model"];
+  if (nextTicket) return ["/status", "tickets list", `tickets read ${nextTicket.key}`, `agents run ${nextTicket.key}`, "/model"];
   return ["/status", "tickets list", "upgrades list", "events 5", "mux"];
+}
+
+export function agentSuggestions(providerId: string, state: GameState) {
+  if (["active", "scaled", "rate-limited"].includes(state.incidentResponse)) {
+    return ["What's happening with the gateway?", "How can we contain the incident?", "What tickets are ready?"];
+  }
+  const review = state.reviews.find((candidate) => modelById.get(state.sessions[candidate.sessionId]?.modelId ?? "")?.providerId === providerId) ?? state.reviews[0];
+  const reviewKey = review ? ticketById.get(review.ticketId)?.key : undefined;
+  if (reviewKey) return [`What changed in ${reviewKey}?`, `Is ${reviewKey} safe to approve?`, `Please revise ${reviewKey}`, "How much quota is left?"];
+  const next = availableTickets(state)[0];
+  if (next) return ["What should I work on next?", "Please take the next ticket", `Tell me about ${next.key}`, "How much quota is left?"];
+  return ["What are you working on?", "What reviews need a decision?", "How much quota is left?"];
 }

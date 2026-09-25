@@ -28,7 +28,7 @@ import { BALANCE } from "../game/balance";
 import { availableModels, availableTickets, isReviewBlocked, reviewRiskFactors, ticketProgressLabel, visibleTickets } from "../game/selectors";
 import type { GameState, SessionState } from "../game/types";
 import { useGameStore } from "../app/store";
-import { commandSuggestions, evaluateCommand, type CliEffect, type CliMessage, type PaneMode, type PermissionMode, type ReasoningMode } from "./cli";
+import { agentSuggestions, commandSuggestions, evaluateAgentMessage, evaluateCommand, type CliEffect, type CliMessage, type PaneMode, type PermissionMode, type ReasoningMode } from "./cli";
 
 const percent = (value: number) => `${Math.round(value)}%`;
 const clock = (seconds: number) => {
@@ -324,10 +324,15 @@ interface TerminalTabState {
   permissionMode?: PermissionMode;
   reasoning?: ReasoningMode;
   view?: PaneMode;
+  surface: "agent" | "shell";
   input: string;
   history: TerminalLine[];
   commands: string[];
   commandCursor: number;
+  shellInput: string;
+  shellHistory: TerminalLine[];
+  shellCommands: string[];
+  shellCommandCursor: number;
 }
 
 let terminalLineId = 0;
@@ -341,7 +346,7 @@ function providerBanner(providerId: string, modelId: string, state = useGameStor
   const objective = nextTicket
     ? `Objective: ship ${nextTicket.key}, then a safe first release.`
     : "Objective: review the active release and ship the safest next change.";
-  const example = nextTicket ? `Try “work on ${nextTicket.key}”, or run /help.` : "Review tickets with `tickets list`, or run /help.";
+  const example = nextTicket ? "Ask me to take the next ticket in your own words, or switch to Terminal for exact tools." : "Ask about the current reviews, or switch to Terminal for exact tools.";
   if (providerId === "openmind") {
     return [
       "╭──────────────────────────────────────────────────╮",
@@ -383,9 +388,14 @@ function createProviderTab(providerId: string, name?: string): TerminalTabState 
     modelId,
     permissionMode: providerId === "openmind" ? "workspace-write" : "ask",
     reasoning: "medium",
+    surface: "agent",
     input: "",
     commands: [],
     commandCursor: 0,
+    shellInput: "",
+    shellHistory: [terminalLine("system", "OPERATOR TERMINAL · ~/delivery\nExact tools live here. Try `tickets list`, `reviews list`, or `help`.")],
+    shellCommands: [],
+    shellCommandCursor: 0,
     history: [
       terminalLine("system", providerBanner(providerId, modelId)),
     ],
@@ -395,7 +405,7 @@ function createProviderTab(providerId: string, name?: string): TerminalTabState 
 function createMonitorTab(view: PaneMode): TerminalTabState {
   const id = `term-${terminalTabId}`;
   terminalTabId += 1;
-  return { id, name: view === "dashboard" ? "dashboard.live" : `watch.${view}`, kind: "monitor", view, input: "", history: [], commands: [], commandCursor: 0 };
+  return { id, name: view === "dashboard" ? "dashboard.live" : `watch.${view}`, kind: "monitor", view, surface: "shell", input: "", history: [], commands: [], commandCursor: 0, shellInput: "", shellHistory: [], shellCommands: [], shellCommandCursor: 0 };
 }
 
 function defaultTerminalTabs() {
@@ -408,8 +418,31 @@ function loadTerminalTabs() {
     if (parsed?.length && parsed.every((tab) => tab.id && tab.name && tab.kind && Array.isArray(tab.history))) {
       const highest = Math.max(...parsed.map((tab) => Number(tab.id.split("-")[1]) || 0));
       terminalTabId = highest + 1;
-      terminalLineId = Math.max(terminalLineId, ...parsed.flatMap((tab) => tab.history.map((line) => line.id || 0)));
-      return parsed.slice(0, 8);
+      terminalLineId = Math.max(terminalLineId, ...parsed.flatMap((tab) => [...tab.history, ...(tab.shellHistory ?? [])].map((line) => line.id || 0)));
+      return parsed.slice(0, 8).map((tab) => {
+        if (tab.kind === "provider" && !tab.surface && tab.providerId && tab.modelId) {
+          return {
+            ...tab,
+            surface: "agent" as const,
+            input: "",
+            history: [terminalLine("system", providerBanner(tab.providerId, tab.modelId))],
+            commands: [],
+            commandCursor: 0,
+            shellInput: tab.input,
+            shellHistory: tab.history,
+            shellCommands: tab.commands,
+            shellCommandCursor: tab.commandCursor,
+          };
+        }
+        return {
+          ...tab,
+          surface: tab.surface ?? "agent",
+          shellInput: tab.shellInput ?? "",
+          shellHistory: tab.shellHistory ?? [terminalLine("system", "OPERATOR TERMINAL · ~/delivery\nExact tools live here. Try `tickets list`, `reviews list`, or `help`.")],
+          shellCommands: tab.shellCommands ?? [],
+          shellCommandCursor: tab.shellCommandCursor ?? 0,
+        };
+      });
     }
   } catch {
     // A broken terminal layout should never block the game save.
@@ -482,8 +515,10 @@ export function App() {
   const updateTab = (id: string, update: (tab: TerminalTabState) => TerminalTabState) => {
     setTabs((current) => current.map((tab) => tab.id === id ? update(tab) : tab));
   };
-  const appendLines = (id: string, lines: TerminalLine[]) => {
-    updateTab(id, (tab) => ({ ...tab, history: [...tab.history, ...lines].slice(-240) }));
+  const appendLines = (id: string, lines: TerminalLine[], surface?: "agent" | "shell") => {
+    updateTab(id, (tab) => (surface ?? tab.surface) === "shell"
+      ? { ...tab, shellHistory: [...tab.shellHistory, ...lines].slice(-240) }
+      : { ...tab, history: [...tab.history, ...lines].slice(-240) });
   };
   const addTab = (providerId = currentTab.providerId ?? "anthill", name?: string) => {
     if (!multiTabUnlocked) {
@@ -584,7 +619,7 @@ export function App() {
     if (importInputRef.current) importInputRef.current.value = "";
   };
 
-  const applyEffect = async (effect: CliEffect, tabId: string) => {
+  const applyEffect = async (effect: CliEffect, tabId: string, surface: "agent" | "shell") => {
     const store = useGameStore.getState();
     let failure: string | null = null;
     if (effect.type === "assign") failure = store.assign(effect.sessionId, effect.ticketId, effect.modelId, effect.improveBrief, effect.reasoning);
@@ -598,7 +633,7 @@ export function App() {
     if (effect.type === "purchase") failure = store.purchase(effect.upgradeId);
     if (effect.type === "mitigate") failure = store.mitigate(effect.action);
     if (effect.type === "speed") store.setSpeed(effect.speed);
-    if (effect.type === "clear") updateTab(tabId, (tab) => ({ ...tab, history: [] }));
+    if (effect.type === "clear") updateTab(tabId, (tab) => surface === "shell" ? { ...tab, shellHistory: [] } : { ...tab, history: [] });
     if (effect.type === "new-session") updateTab(tabId, (tab) => tab.providerId && tab.modelId ? { ...tab, history: [terminalLine("system", providerBanner(tab.providerId, tab.modelId, store.game))], input: "", commands: [], commandCursor: 0 } : tab);
     if (effect.type === "model") updateTab(tabId, (tab) => ({
       ...tab,
@@ -628,21 +663,25 @@ export function App() {
     }
     if (effect.type === "import") importInputRef.current?.click();
     if (effect.type === "restart") await restartRun();
-    if (failure) appendLines(tabId, [terminalLine("error", `error: ${failure}`)]);
-    else if (["assign", "review", "compact", "purchase", "mitigate"].includes(effect.type)) appendLines(tabId, [terminalLine("success", "ok")]);
+    if (failure) appendLines(tabId, [terminalLine("error", `${surface === "shell" ? "error: " : ""}${failure}`)], surface);
+    else if (["assign", "review", "compact", "purchase", "mitigate"].includes(effect.type)) appendLines(tabId, [terminalLine("success", surface === "shell" ? "ok" : "On it.")], surface);
   };
 
-  const execute = async (raw: string, tabId = activeTabId) => {
+  const execute = async (raw: string, tabId = activeTabId, requestedSurface?: "agent" | "shell") => {
     const command = raw.trim();
     if (!command) return;
     if (soundEnabled) activateAudio();
     const tab = tabs.find((candidate) => candidate.id === tabId);
     if (!tab || tab.kind !== "provider" || !tab.providerId) return;
-    updateTab(tabId, (tab) => ({ ...tab, input: "", commands: [...tab.commands, command].slice(-60), commandCursor: tab.commands.length + 1 }));
-    appendLines(tabId, [terminalLine("command", command)]);
-    const result = evaluateCommand(command, useGameStore.getState().game, { providerId: tab.providerId, modelId: tab.modelId, permissionMode: tab.permissionMode, reasoning: tab.reasoning, sessionId: tab.boundSessionId ?? null });
-    if (result.messages.length) appendLines(tabId, result.messages.map((message) => terminalLine(message.kind, message.text)));
-    if (result.effect) await applyEffect(result.effect, tabId);
+    const surface = requestedSurface ?? tab.surface;
+    updateTab(tabId, (current) => surface === "shell"
+      ? { ...current, shellInput: "", shellCommands: [...current.shellCommands, command].slice(-60), shellCommandCursor: current.shellCommands.length + 1 }
+      : { ...current, input: "", commands: [...current.commands, command].slice(-60), commandCursor: current.commands.length + 1 });
+    appendLines(tabId, [terminalLine("command", command)], surface);
+    const context = { providerId: tab.providerId, modelId: tab.modelId, permissionMode: tab.permissionMode, reasoning: tab.reasoning, sessionId: tab.boundSessionId ?? null };
+    const result = surface === "shell" ? evaluateCommand(command, useGameStore.getState().game, context, true) : evaluateAgentMessage(command, useGameStore.getState().game, context);
+    if (result.messages.length) appendLines(tabId, result.messages.map((message) => terminalLine(message.kind, message.text)), surface);
+    if (result.effect) await applyEffect(result.effect, tabId, surface);
   };
 
   useEffect(() => { void hydrate(); }, [hydrate]);
@@ -704,7 +743,7 @@ export function App() {
         ? tabs.find((tab) => tab.kind === "provider" && tab.providerId === event.providerId)?.id
         : undefined;
       const target = boundTarget ?? providerTarget ?? (currentTab.kind === "provider" ? activeTabId : tabs.find((tab) => tab.kind === "provider")?.id);
-      if (target) appendLines(target, [terminalLine("event", `[${event.tone}] ${event.title}\n${event.message}`)]);
+      if (target) appendLines(target, [terminalLine("event", `[${event.tone}] ${event.title}\n${event.message}`)], "agent");
     }
   }, [game.events, soundEnabled]);
   useEffect(() => {
@@ -714,7 +753,7 @@ export function App() {
         behavior: reduceMotion || window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
       });
     }
-  }, [activeTabId, paneTabId, currentTab?.history.length, secondaryTab?.history.length, reduceMotion]);
+  }, [activeTabId, paneTabId, currentTab?.surface, currentTab?.history.length, currentTab?.shellHistory.length, secondaryTab?.surface, secondaryTab?.history.length, secondaryTab?.shellHistory.length, reduceMotion]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key === "Tab") {
@@ -734,16 +773,23 @@ export function App() {
   if (!hydrated) return <main className="loading-screen"><CircleGauge /><p>Attaching operator console…</p></main>;
 
   const onInputKey = (event: React.KeyboardEvent<HTMLInputElement>, tab: TerminalTabState) => {
-    if (event.key === "Enter") void execute(tab.input, tab.id);
+    const surface = tab.surface;
+    const commands = surface === "shell" ? tab.shellCommands : tab.commands;
+    const cursor = surface === "shell" ? tab.shellCommandCursor : tab.commandCursor;
+    if (event.key === "Enter") void execute(surface === "shell" ? tab.shellInput : tab.input, tab.id, surface);
     if (event.key === "ArrowUp") {
       event.preventDefault();
-      const next = Math.max(0, tab.commandCursor - 1);
-      updateTab(tab.id, (current) => ({ ...current, commandCursor: next, input: current.commands[next] ?? current.input }));
+      const next = Math.max(0, cursor - 1);
+      updateTab(tab.id, (current) => surface === "shell"
+        ? { ...current, shellCommandCursor: next, shellInput: commands[next] ?? current.shellInput }
+        : { ...current, commandCursor: next, input: commands[next] ?? current.input });
     }
     if (event.key === "ArrowDown") {
       event.preventDefault();
-      const next = Math.min(tab.commands.length, tab.commandCursor + 1);
-      updateTab(tab.id, (current) => ({ ...current, commandCursor: next, input: current.commands[next] ?? "" }));
+      const next = Math.min(commands.length, cursor + 1);
+      updateTab(tab.id, (current) => surface === "shell"
+        ? { ...current, shellCommandCursor: next, shellInput: commands[next] ?? "" }
+        : { ...current, commandCursor: next, input: commands[next] ?? "" });
     }
   };
 
@@ -754,21 +800,28 @@ export function App() {
     : undefined;
   const contextRemaining = Math.round(currentSession?.context ?? 100);
   const quotaRemaining = currentTab.providerId ? Math.round(game.providerQuota[currentTab.providerId] ?? 0) : 0;
-  const shellCommand = currentTab.kind === "monitor" ? `watch ${currentTab.view}` : currentTab.providerId === "openmind" ? "forge" : "anthill";
+  const shellCommand = currentTab.kind === "monitor" ? `watch ${currentTab.view}` : currentTab.surface === "shell" ? "operator-shell" : currentTab.providerId === "openmind" ? "forge" : "anthill";
   const renderPane = (tab: TerminalTabState, secondary = false) => {
     const provider = tab.providerId ? providerById.get(tab.providerId) : undefined;
+    const shell = tab.surface === "shell";
+    const visibleHistory = shell ? tab.shellHistory : tab.history;
     return (
       <div className={`terminal-pane ${secondary ? "secondary-pane" : "primary-pane"} ${tab.kind === "monitor" ? "tool-view" : `provider-${tab.providerId}`}`} key={tab.id}>
         {secondary && <div className="pane-heading"><span>{tab.name} · LIVE</span><div><button onClick={() => { setActiveTabId(tab.id); setPaneTabId(null); }}>Fill window</button><button onClick={() => setPaneTabId(null)} aria-label="Close second pane">×</button></div></div>}
         {tab.kind === "provider" ? (
           <section className="terminal-shell" aria-label={`${provider?.name} session`}>
+            <div className="surface-switch" role="group" aria-label={`${provider?.name} surface`}>
+              <button aria-pressed={!shell} className={!shell ? "active" : ""} onClick={() => updateTab(tab.id, (current) => ({ ...current, surface: "agent" }))}>Agent</button>
+              <button aria-pressed={shell} className={shell ? "active" : ""} onClick={() => updateTab(tab.id, (current) => ({ ...current, surface: "shell" }))}>Terminal</button>
+              <span>{shell ? "Exact tool commands" : "Ask in your own words"}</span>
+            </div>
             <div className="terminal-output" ref={secondary ? secondaryOutputRef : outputRef} role="log" aria-live="polite">
-              {tab.history.map((line) => <div className={`terminal-line line-${line.kind}`} key={line.id}>{line.kind === "command" && <span className="line-prompt">{tab.providerId === "openmind" ? "›" : ">"}</span>}<pre>{line.text}</pre></div>)}
-              <div className="command-launchers" aria-label={`${provider?.name} suggested commands`}>{commandSuggestions(tab.providerId ?? "anthill", game).map((command) => <button key={command} onClick={() => void execute(command, tab.id)}>{command}</button>)}</div>
+              {visibleHistory.map((line) => <div className={`terminal-line line-${line.kind}`} key={line.id}>{line.kind === "command" && <span className="line-prompt">{shell ? "$" : tab.providerId === "openmind" ? "›" : ">"}</span>}<pre>{line.text}</pre></div>)}
+              <div className={`command-launchers ${shell ? "shell-suggestions" : "agent-suggestions"}`} aria-label={`${provider?.name} suggested ${shell ? "commands" : "prompts"}`}>{(shell ? commandSuggestions(tab.providerId ?? "anthill", game) : agentSuggestions(tab.providerId ?? "anthill", game)).map((suggestion) => <button key={suggestion} onClick={() => void execute(suggestion, tab.id, tab.surface)}>{suggestion}</button>)}</div>
             </div>
             <div className={`terminal-prompt prompt-${tab.providerId}`}>
-              <span className="provider-chevron">{tab.providerId === "openmind" ? "›" : ">"}</span>
-              <input autoFocus={!secondary} aria-label={`${provider?.name} command`} placeholder={tab.providerId === "openmind" ? "Describe a task or /command" : "Message Anthill Code…"} autoComplete="off" spellCheck={false} value={tab.input} onChange={(event) => updateTab(tab.id, (current) => ({ ...current, input: event.target.value }))} onKeyDown={(event) => onInputKey(event, tab)} />
+              <span className="provider-chevron">{shell ? "$" : tab.providerId === "openmind" ? "›" : ">"}</span>
+              <input key={tab.surface} autoFocus={!secondary} aria-label={`${provider?.name} ${shell ? "command" : "message"}`} placeholder={shell ? "Enter a tool command…" : "Ask your agent anything about the work…"} autoComplete="off" spellCheck={false} value={shell ? tab.shellInput : tab.input} onChange={(event) => updateTab(tab.id, (current) => shell ? { ...current, shellInput: event.target.value } : { ...current, input: event.target.value })} onKeyDown={(event) => onInputKey(event, tab)} />
             </div>
           </section>
         ) : tab.view ? <MonitorPane mode={tab.view} game={game} /> : null}

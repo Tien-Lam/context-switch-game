@@ -310,7 +310,12 @@ select { width: 100%; border: 1px solid #30323d; background: #0f1015; border-rad
 .pane-heading > div { display: flex; gap: 5px; }
 .pane-heading button { border: 0; background: transparent; color: #9da2ac; font: inherit; cursor: pointer; }
 .pane-heading button:hover, .pane-heading button:focus-visible { color: white; }
-.terminal-shell { min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr) 52px; position: relative; }
+.terminal-shell { min-width: 0; min-height: 0; display: grid; grid-template-rows: 34px minmax(0, 1fr) 52px; position: relative; }
+.surface-switch { display: flex; align-items: stretch; gap: 4px; padding: 4px 12px; border-bottom: 1px solid #292c34; background: #101217; font: 500 10px var(--mono); }
+.surface-switch button { border: 1px solid transparent; border-radius: 4px; background: transparent; color: #858995; padding: 0 11px; font: inherit; cursor: pointer; }
+.surface-switch button.active { border-color: #45405b; background: #242030; color: #e0dafa; }
+.surface-switch button:hover { color: #f0edf8; }
+.surface-switch span { align-self: center; margin-left: auto; color: #727783; white-space: nowrap; }
 .terminal-pane.provider-anthill .terminal-shell { background: radial-gradient(circle at 16% 10%, rgba(212,155,120,.055), transparent 30rem), #080a0d; }
 .terminal-pane.provider-openmind .terminal-shell { background: radial-gradient(circle at 84% 10%, rgba(114,215,195,.05), transparent 30rem), #080a0d; }
 .terminal-output { min-height: 0; overflow: auto; padding: 18px 20px 28px; scrollbar-color: #383b45 transparent; scroll-behavior: smooth; }
@@ -328,6 +333,7 @@ select { width: 100%; border: 1px solid #30323d; background: #0f1015; border-rad
 .command-launchers { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 24px; }
 .command-launchers button { border: 1px solid #2d3139; background: #11141a; color: #777c87; border-radius: 4px; padding: 6px 9px; font: 500 9px var(--mono); }
 .command-launchers button::before { content: "$ "; color: #5dbdaf; }
+.command-launchers.agent-suggestions button::before { content: "› "; color: #b09bf4; }
 .command-launchers button:hover { border-color: #595064; color: #c6c8ce; }
 .terminal-prompt { display: flex; align-items: center; gap: 0; border-top: 1px solid #292c34; background: #0d0f13; padding: 0 14px; color: #7f8490; font: 500 12px var(--mono); }
 .terminal-prompt.prompt-anthill { margin: 0 16px 10px; border: 1px solid #4a3b34; border-radius: 9px; background: #11100f; box-shadow: 0 8px 26px #0007; }
@@ -400,6 +406,7 @@ select { width: 100%; border: 1px solid #30323d; background: #0f1015; border-rad
   .terminal-tab { min-width: 125px; }
   .terminal-contextbar { gap: 12px; padding: 0 9px; }
   .terminal-contextbar span:first-child { display: none; }
+  .surface-switch span { display: none; }
   .terminal-output { padding: 14px 11px 24px; }
   .terminal-line { font-size: 10px; gap: 6px; }
   .line-prompt { display: block; }

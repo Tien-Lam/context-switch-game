@@ -2,13 +2,14 @@
 
 [Play the alpha on GitHub Pages](https://tien-lam.github.io/context-switch-game/).
 
-A local-first narrative idle-management game about supervising fictional coding agents under quota, context, review, and reliability pressure. The game is operated through two fictional coding-agent CLIs: read tickets, start provider-bound sessions, inspect reviews, switch models, and buy structural upgrades with typed or natural-language commands.
+A local-first narrative idle-management game about supervising fictional coding agents under quota, context, review, and reliability pressure. Each fictional provider has an agent conversation for ordinary requests and a separate terminal surface for exact tools. Ask an agent to take work, inspect reviews, or explain a ticket in your own words; switch to Terminal to run commands such as `tickets list` or `reviews read APP-101`.
 
 Everything in the game is simulated. It does not call an AI service, connect to developer accounts, or access a real repository.
 
 ## Terminal progression
 
 - Start with full-window **Anthill Code** and **OpenMind Forge** sessions, each with its own prompt, models, slash commands, and quota pool.
+- Switch between **Agent** and **Terminal** inside either provider tab. Each surface keeps its own input and history; terminal commands are available from the start.
 - Ship one ticket to unlock additional provider sessions.
 - Ship two tickets to unlock workspace naming.
 - Ship three tickets to unlock full-window operations tabs and a true second pane. Use `pane split agents`, `pane split reviews`, or `pane split 2` to monitor work or operate another provider CLI alongside the current one. Use `pane swap` and `pane close` to manage the layout.

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createInitialState } from "../src/game/initialState";
 import { advanceGame, buyUpgrade, startTicket } from "../src/game/engine";
-import { commandSuggestions, evaluateCommand } from "../src/ui/cli";
+import { agentSuggestions, commandSuggestions, evaluateAgentMessage, evaluateCommand } from "../src/ui/cli";
 
 describe("operator CLI", () => {
   it("reads authored tickets through a terminal tool", () => {
@@ -83,6 +83,48 @@ describe("operator CLI", () => {
     });
   });
 
+  it("lets an agent take work without an exact ticket key or command form", () => {
+    const state = createInitialState();
+    for (const prompt of ["Could you take care of the deployment banner?", "Please handle rename the deployment banner", "Please rename the deployment banner", "Let's do the next ticket", "Ship APP-101"]) {
+      expect(evaluateAgentMessage(prompt, state).effect, prompt).toMatchObject({ type: "assign", ticketId: "deployment-banner" });
+    }
+    expect(evaluateAgentMessage("What should I work on next?", state).effect).toBeUndefined();
+    expect(evaluateAgentMessage("What should I work on next?", state).messages[0].text).toContain("APP-101");
+    expect(evaluateAgentMessage("Tell me about the deployment banner", state).messages[0].text).toContain("Change the staging banner copy");
+    state.completedTicketIds.push("deployment-banner");
+    expect(evaluateAgentMessage("Could you cache the dashboard summary?", state).effect).toMatchObject({ type: "assign", ticketId: "cache-summary" });
+  });
+
+  it("keeps exact syntax in the terminal while accepting natural requests in agent chat", () => {
+    const state = createInitialState();
+    expect(evaluateCommand("Could you handle the banner?", state, undefined, true).messages[0].kind).toBe("error");
+    expect(evaluateCommand("agents run APP-101", state, undefined, true).effect).toMatchObject({ type: "assign", ticketId: "deployment-banner" });
+    expect(evaluateAgentMessage("Could you handle the banner?", state).effect).toMatchObject({ type: "assign", ticketId: "deployment-banner" });
+    expect(evaluateAgentMessage("tickets list", state).messages[0].text).toContain("APP-101");
+    expect(evaluateAgentMessage("/help", state).messages[0].text).toContain("ordinary language");
+    expect(evaluateCommand("help", state, undefined, true).messages[0].text).toContain("agents run <KEY>");
+    expect(agentSuggestions("anthill", state)).toContain("What should I work on next?");
+  });
+
+  it("answers review questions and understands natural review decisions", () => {
+    const state = createInitialState();
+    state.sessions[0] = { ...state.sessions[0], status: "awaiting-review", ticketId: "deployment-banner", modelId: "ballad" };
+    state.reviews.push({ id: "review-1", ticketId: "deployment-banner", sessionId: 0, risk: 0.12, createdAt: 4 });
+    const inquiry = evaluateAgentMessage("Is this safe to approve?", state);
+    expect(inquiry.effect).toBeUndefined();
+    expect(inquiry.messages[0].text).toContain("REVIEW APP-101");
+    expect(evaluateAgentMessage("Please revise this review", state).effect).toEqual({ type: "review", reviewId: "review-1", decision: "revise" });
+    expect(evaluateAgentMessage("Approve it", state).effect).toEqual({ type: "review", reviewId: "review-1", decision: "approve" });
+    expect(evaluateAgentMessage("Ship APP-101", state).effect).toEqual({ type: "review", reviewId: "review-1", decision: "approve" });
+  });
+
+  it("accepts a natural incident containment request", () => {
+    const state = createInitialState();
+    state.incidentResponse = "active";
+    expect(evaluateAgentMessage("Please rate limit the gateway", state).effect).toEqual({ type: "mitigate", action: "rate-limit" });
+    expect(evaluateAgentMessage("How can we contain this incident?", state).effect).toBeUndefined();
+  });
+
   it("suggests the next ready ticket instead of a shipped opening ticket", () => {
     const state = createInitialState();
     state.completedTicketIds = ["deployment-banner", "telemetry-toggle", "cache-summary", "runtime-upgrade", "webhook-backoff", "parallel-reports", "quota-display", "stale-customer-data", "investor-demo"];
@@ -97,11 +139,11 @@ describe("operator CLI", () => {
     for (const prompt of ["don't work on APP-101", "don’t start APP-101", "do not implement APP-101", "never assign APP-101", "I do not want you to work on APP-101", "I do not want you working on APP-101", "Please avoid working on APP-101", "Do not do work on APP-101", "I would rather not work on APP-101", "Please hold off on APP-101", "Do not begin work on APP-101", "Please refrain from working on APP-101", "Delay work on APP-101", "Wait to start APP-101", "I cannot work on APP-101 yet", "I am not ready to start APP-101", "We should postpone work on APP-101"]) {
       const result = evaluateCommand(prompt, state);
       expect(result.effect).toBeUndefined();
-      expect(result.messages[0].text).toContain("No work started");
+      expect(result.messages[0].text, prompt).toContain("No work started");
     }
     const ambiguous = evaluateCommand("APP-101 looks risky", state);
     expect(ambiguous.effect).toBeUndefined();
-    expect(ambiguous.messages[0].text).toContain("No work started");
+    expect(ambiguous.messages[0].text).toContain("APP-101 · Rename the deployment banner");
   });
 
   it("shows baseline and projected risk when listing tickets", () => {
@@ -202,11 +244,11 @@ describe("operator CLI", () => {
 
   it("changes command suggestions with available work and reviews", () => {
     const state = createInitialState();
-    expect(commandSuggestions("anthill", state)).toContain("work on APP-101");
+    expect(commandSuggestions("anthill", state)).toContain("agents run APP-101");
     state.sessions[0] = { ...state.sessions[0], status: "awaiting-review", ticketId: "deployment-banner", modelId: "ballad", progress: 1 };
     state.reviews.push({ id: "review-1", ticketId: "deployment-banner", sessionId: 0, risk: 0.12, createdAt: 4 });
     expect(commandSuggestions("anthill", state)).toContain("reviews read APP-101");
-    expect(commandSuggestions("anthill", state)).not.toContain("work on APP-101");
+    expect(commandSuggestions("anthill", state)).not.toContain("agents run APP-101");
     expect(commandSuggestions("anthill", state)).not.toContain("reviews approve APP-101");
     state.sessions[1] = { ...state.sessions[1], status: "awaiting-review", ticketId: "cache-summary", modelId: "spark", progress: 1 };
     state.reviews.push({ id: "review-2", ticketId: "cache-summary", sessionId: 1, risk: 0.4, createdAt: 4 });
