@@ -29,6 +29,7 @@ import { availableModels, availableTickets, isReviewBlocked, reviewRiskFactors, 
 import type { GameState, SessionState } from "../game/types";
 import { useGameStore } from "../app/store";
 import { agentSuggestions, commandSuggestions, evaluateAgentMessage, evaluateCommand, type CliEffect, type CliMessage, type PaneMode, type PermissionMode, type ReasoningMode } from "./cli";
+import { createVirtualFileSystem, displayShellPath, evaluateVirtualShell, SHELL_WORKSPACE, type VirtualFileSystem } from "./virtualShell";
 
 const percent = (value: number) => `${Math.round(value)}%`;
 const clock = (seconds: number) => {
@@ -325,6 +326,7 @@ interface TerminalTabState {
   reasoning?: ReasoningMode;
   view?: PaneMode;
   surface: "agent" | "shell";
+  cwd: string;
   input: string;
   history: TerminalLine[];
   commands: string[];
@@ -375,8 +377,7 @@ function defaultModel(providerId: string) {
   return providerId === "openmind" ? "spark" : "ballad";
 }
 
-const shellOnlyCommands = new Set(["help", "?", "tickets", "reviews", "review", "diff", "incident", "events", "upgrades", "agents", "speed", "tab", "pane", "watch", "dashboard", "save", "restart", "clear", "trace", "mux", "sound", "motion"]);
-const shellHelp = "TERMINAL · ~/delivery\n  anthill                    launch Anthill Code\n  forge                      launch OpenMind Forge\n  tickets list|read <KEY>    inspect work\n  reviews list|read <KEY>    inspect pending changes\n  agents list               inspect active work\n  upgrades list             inspect upgrades\n  help                      show this reference\n\nEach terminal tab can launch either agent. Agent chat opens in this tab; switch back to Terminal for exact tools.";
+const shellOnlyCommands = new Set(["tickets", "reviews", "review", "diff", "incident", "events", "upgrades", "agents", "speed", "tab", "pane", "watch", "dashboard", "save", "restart", "clear", "trace", "mux", "sound", "motion"]);
 
 function createTerminalTab(name?: string): TerminalTabState {
   const id = `term-${terminalTabId}`;
@@ -386,6 +387,7 @@ function createTerminalTab(name?: string): TerminalTabState {
     name: name || `Terminal ${terminalTabId - 1}`,
     kind: "provider",
     surface: "shell",
+    cwd: SHELL_WORKSPACE,
     input: "",
     commands: [],
     commandCursor: 0,
@@ -400,7 +402,7 @@ function createTerminalTab(name?: string): TerminalTabState {
 function createMonitorTab(view: PaneMode): TerminalTabState {
   const id = `term-${terminalTabId}`;
   terminalTabId += 1;
-  return { id, name: view === "dashboard" ? "dashboard.live" : `watch.${view}`, kind: "monitor", view, surface: "shell", input: "", history: [], commands: [], commandCursor: 0, shellInput: "", shellHistory: [], shellCommands: [], shellCommandCursor: 0 };
+  return { id, name: view === "dashboard" ? "dashboard.live" : `watch.${view}`, kind: "monitor", view, surface: "shell", cwd: SHELL_WORKSPACE, input: "", history: [], commands: [], commandCursor: 0, shellInput: "", shellHistory: [], shellCommands: [], shellCommandCursor: 0 };
 }
 
 function defaultTerminalTabs() {
@@ -414,7 +416,7 @@ function loadTerminalTabs() {
       const highest = Math.max(...parsed.map((tab) => Number(tab.id.split("-")[1]) || 0));
       terminalTabId = highest + 1;
       terminalLineId = Math.max(terminalLineId, ...parsed.flatMap((tab) => [...tab.history, ...(tab.shellHistory ?? [])].map((line) => line.id || 0)));
-      return parsed.slice(0, 8);
+      return parsed.slice(0, 8).map((tab) => ({ ...tab, cwd: tab.cwd ?? SHELL_WORKSPACE }));
     }
   } catch {
     // A broken terminal layout should never block the game save.
@@ -461,6 +463,13 @@ export function App() {
   const dismissNotice = useGameStore((store) => store.dismissNotice);
   const importSave = useGameStore((store) => store.importSave);
   const [tabs, setTabs] = useState<TerminalTabState[]>(loadTerminalTabs);
+  const [virtualFs, setVirtualFs] = useState<VirtualFileSystem>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("context-switch-virtual-fs-v1") ?? "null") as VirtualFileSystem | null;
+      if (saved?.entries && typeof saved.entries === "object" && Array.isArray(saved.deletedSeeds)) return saved;
+    } catch { /* A broken sandbox should not block the game. */ }
+    return createVirtualFileSystem();
+  });
   const [activeTabId, setActiveTabId] = useState(() => tabs[0].id);
   const [paneTabId, setPaneTabId] = useState<string | null>(() => localStorage.getItem("context-switch-pane-tab-v1"));
   const [soundEnabled, setSoundEnabled] = useState(() => localStorage.getItem("context-switch-sound-v1") === "on");
@@ -577,6 +586,7 @@ export function App() {
     setTabs(defaults);
     setActiveTabId(defaults[0].id);
     setPaneTabId(null);
+    setVirtualFs(createVirtualFileSystem());
   };
   const onImport = async (file?: File) => {
     if (file && window.confirm("Replace the current run with this local save?")) {
@@ -586,6 +596,7 @@ export function App() {
         setTabs(defaults);
         setActiveTabId(defaults[0].id);
         setPaneTabId(null);
+        setVirtualFs(createVirtualFileSystem());
       }
     }
     if (importInputRef.current) importInputRef.current.value = "";
@@ -650,6 +661,16 @@ export function App() {
       ? { ...current, shellInput: "", shellCommands: [...current.shellCommands, command].slice(-60), shellCommandCursor: current.shellCommands.length + 1 }
       : { ...current, input: "", commands: [...current.commands, command].slice(-60), commandCursor: current.commands.length + 1 });
     appendLines(tabId, [terminalLine("command", command)], surface);
+    if (surface === "shell") {
+      const result = evaluateVirtualShell(command, useGameStore.getState().game, tab.cwd, virtualFs, [...tab.shellCommands, command]);
+      setVirtualFs(result.fs);
+      if (result.handled) {
+        if (result.cwd !== tab.cwd) updateTab(tabId, (current) => ({ ...current, cwd: result.cwd }));
+        if (result.error) appendLines(tabId, [terminalLine("error", `error: ${result.error}`)], "shell");
+        else if (result.text) appendLines(tabId, [terminalLine("output", result.text)], "shell");
+        return;
+      }
+    }
     if (!tab.providerId) {
       const launchId = command.toLowerCase() === "anthill" ? "anthill" : command.toLowerCase() === "forge" ? "openmind" : undefined;
       if (launchId) {
@@ -671,10 +692,6 @@ export function App() {
         return;
       }
       const root = command.split(/\s+/)[0].replace(/^\//, "").toLowerCase();
-      if (root === "help" || root === "?") {
-        appendLines(tabId, [terminalLine("output", shellHelp)], "shell");
-        return;
-      }
       if (!shellOnlyCommands.has(root) || (root === "agents" && !/^agents(?:\s+list)?$/i.test(command))) {
         appendLines(tabId, [terminalLine("error", "error: launch an agent with `anthill` or `forge` first; run `help` for terminal tools")], "shell");
         return;
@@ -710,6 +727,7 @@ export function App() {
     return () => { window.clearInterval(interval); window.clearInterval(autosave); document.removeEventListener("visibilitychange", onVisibility); };
   }, [hydrate, hydrated, persist, pulse, reconcile]);
   useEffect(() => { localStorage.setItem("context-switch-terminal-tabs-v3", JSON.stringify(tabs)); }, [tabs]);
+  useEffect(() => { localStorage.setItem("context-switch-virtual-fs-v1", JSON.stringify(virtualFs)); }, [virtualFs]);
   useEffect(() => {
     if (paneTabId) localStorage.setItem("context-switch-pane-tab-v1", paneTabId);
     else localStorage.removeItem("context-switch-pane-tab-v1");
@@ -805,7 +823,7 @@ export function App() {
     : undefined;
   const contextRemaining = Math.round(currentSession?.context ?? 100);
   const quotaRemaining = currentTab.providerId ? Math.round(game.providerQuota[currentTab.providerId] ?? 0) : 0;
-  const shellCommand = currentTab.kind === "monitor" ? `watch ${currentTab.view}` : !currentTab.providerId ? "~/delivery" : currentTab.surface === "shell" ? "operator-shell" : currentTab.providerId === "openmind" ? "forge" : "anthill";
+  const shellCommand = currentTab.kind === "monitor" ? `watch ${currentTab.view}` : currentTab.surface === "shell" ? displayShellPath(currentTab.cwd) : currentTab.providerId === "openmind" ? "forge" : "anthill";
   const renderPane = (tab: TerminalTabState, secondary = false) => {
     const provider = tab.providerId ? providerById.get(tab.providerId) : undefined;
     const shell = tab.surface === "shell";
@@ -822,9 +840,10 @@ export function App() {
             </div>
             <div className="terminal-output" ref={secondary ? secondaryOutputRef : outputRef} role="log" aria-live="polite">
               {visibleHistory.map((line) => <div className={`terminal-line line-${line.kind}`} key={line.id}>{line.kind === "command" && <span className="line-prompt">{shell ? "$" : tab.providerId === "openmind" ? "›" : ">"}</span>}<pre>{line.text}</pre></div>)}
-              <div className={`command-launchers ${shell ? "shell-suggestions" : "agent-suggestions"}`} aria-label={`${provider?.name ?? tab.name} suggested ${shell ? "commands" : "prompts"}`}>{(!tab.providerId ? ["anthill", "forge", "tickets list", "help"] : shell ? commandSuggestions(tab.providerId, game) : agentSuggestions(tab.providerId, game)).map((suggestion) => <button key={suggestion} onClick={() => void execute(suggestion, tab.id, tab.surface)}>{suggestion}</button>)}</div>
+              <div className={`command-launchers ${shell ? "shell-suggestions" : "agent-suggestions"}`} aria-label={`${provider?.name ?? tab.name} suggested ${shell ? "commands" : "prompts"}`}>{(!tab.providerId ? ["anthill", "forge", "ls", "tickets list", "help"] : shell ? commandSuggestions(tab.providerId, game) : agentSuggestions(tab.providerId, game)).map((suggestion) => <button key={suggestion} onClick={() => void execute(suggestion, tab.id, tab.surface)}>{suggestion}</button>)}</div>
             </div>
             <div className={`terminal-prompt prompt-${tab.providerId ?? "terminal"}`}>
+              {shell && <span className="prompt-path">{displayShellPath(tab.cwd)}</span>}
               <span className="provider-chevron">{shell ? "$" : tab.providerId === "openmind" ? "›" : ">"}</span>
               <input key={tab.surface} autoFocus={!secondary} aria-label={provider ? `${provider.name} ${shell ? "command" : "message"}` : "Terminal command"} placeholder={!tab.providerId ? "Type anthill or forge to launch an agent…" : shell ? "Enter a tool command…" : "Ask your agent anything about the work…"} autoComplete="off" spellCheck={false} value={shell ? tab.shellInput : tab.input} onChange={(event) => updateTab(tab.id, (current) => shell ? { ...current, shellInput: event.target.value } : { ...current, input: event.target.value })} onKeyDown={(event) => onInputKey(event, tab)} />
             </div>
@@ -839,7 +858,7 @@ export function App() {
       <section className="terminal-window" aria-label="Context Switch operator terminal">
         <header className="terminal-titlebar">
           <div className="window-lights" aria-hidden="true"><span /><span /><span /></div>
-          <div className="terminal-window-title"><Terminal />{currentProvider?.name ?? currentTab.name} · ~/delivery</div>
+          <div className="terminal-window-title"><Terminal />{currentProvider?.name ?? currentTab.name} · {displayShellPath(currentTab.cwd)}</div>
           <div className="terminal-window-meta"><span className="online-dot">LIVE</span><span>{clock(game.gameTime)}</span><span>{speed}×</span><button className="header-setting" aria-label={soundEnabled ? "Mute sounds" : "Enable sounds"} aria-pressed={soundEnabled} onClick={() => { if (!soundEnabled) activateAudio(); setSoundEnabled((value) => !value); }}>{soundEnabled ? "♪" : "♪̸"}</button><button className="header-setting" aria-label={reduceMotion ? "Use system motion setting" : "Reduce motion"} aria-pressed={reduceMotion} onClick={() => setReduceMotion((value) => !value)}>◌</button></div>
         </header>
 

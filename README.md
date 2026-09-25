@@ -10,6 +10,7 @@ Everything in the game is simulated. It does not call an AI service, connect to 
 
 - Start with two full-window terminal tabs. Type `anthill` or `forge` in either tab to launch **Anthill Code** or **OpenMind Forge**, each with its own prompt, models, slash commands, and quota pool.
 - After launch, switch between **Agent** and **Terminal** inside the tab. Each surface keeps its own input and history; terminal tools are available even before an agent launches.
+- The terminal includes a persistent, shared virtual workspace: `pwd`, `ls`, `cd`, `cat`, `find`, `grep`, `head`, `tail`, `wc`, `tree`, `mkdir`, `touch`, `cp`, `mv`, `rm`, `echo`, pipes, and output redirection. `git status|log|diff` reflects scripted work. Run `help` for the complete supported command list. This is a sandbox; it never accesses your computer's files, and edits do not complete tickets.
 - Ship one ticket to unlock additional terminal tabs. New tabs also start at a shell prompt.
 - Ship two tickets to unlock workspace naming.
 - Ship three tickets to unlock full-window operations tabs and a true second pane. Use `pane split agents`, `pane split reviews`, or `pane split 2` to monitor work or operate another provider CLI alongside the current one. Use `pane swap` and `pane close` to manage the layout.
@@ -22,6 +23,8 @@ Risky approvals can open short `FIX-*` incident tickets. They appear only after 
 The investor demo is now a chapter break. Its follow-up pack starts with QA-401's suspicious green build, then opens API-420 and UI-421 for parallel provider work. Their combined contract check can reveal an incompatibility even when each branch passed its own tests. The last arc pairs a retrying client with a gateway rollout. If the client creates a request loop, `incident status` shows the evidence and `incident mitigate rollback|rate-limit|scale` offers immediate containment choices before FIX-502 can start. Repairing the retry before the gateway ships prevents the incident entirely. SHIP-2 closes the run.
 
 The second shipment triggers a fictional Anthill plan change. Its quota reduction makes the independent OpenMind pool useful early in the shift. `trace` shows the current run's local events and counters. `sound on|off` and `motion reduce|auto` control optional review chimes and animation; the title bar exposes both settings. No usage data leaves the browser.
+
+The current terminal is a deterministic game shell rendered by the existing React interface. [Xterm.js](https://github.com/xtermjs/xterm.js) is a strong candidate if the game later needs ANSI escape sequences or full-screen terminal programs, but it is a terminal frontend, not a shell or command implementation. A full browser runtime such as [WebContainers](https://webcontainers.io/guides/quickstart) would add process execution and cross-origin-isolation requirements that this scripted, static-hosted alpha does not need.
 
 ## Pacing principle
 

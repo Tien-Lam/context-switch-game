@@ -43,6 +43,38 @@ test("pre-launch shell inspects tickets but cannot assign work without an agent"
   await expect(page.getByRole("tab", { name: /Terminal 2/ })).toBeVisible();
 });
 
+test("basic shell commands share a virtual workspace across tabs and reloads", async ({ page }) => {
+  await page.goto("/");
+  const terminal = page.getByRole("textbox", { name: "Terminal command" });
+  await terminal.fill("pwd");
+  await terminal.press("Enter");
+  await expect(page.locator(".terminal-output")).toContainText("/home/dev/delivery");
+  await terminal.fill("mkdir -p notes/qa");
+  await terminal.press("Enter");
+  await terminal.fill("echo 'review APP-101' > notes/qa/plan.txt");
+  await terminal.press("Enter");
+  await page.getByRole("tab", { name: /Terminal 2/ }).click();
+  const second = page.getByRole("textbox", { name: "Terminal command" });
+  await second.fill("cat notes/qa/plan.txt | grep APP");
+  await second.press("Enter");
+  await expect(page.locator(".terminal-output")).toContainText("review APP-101");
+  await second.fill("cd tickets");
+  await second.press("Enter");
+  await expect(page.locator(".terminal-prompt")).toContainText("~/delivery/tickets");
+  await second.fill("forge");
+  await second.press("Enter");
+  await page.getByRole("button", { name: "Terminal", exact: true }).click();
+  await expect(page.locator(".terminal-prompt")).toContainText("~/delivery/tickets");
+  await page.reload();
+  await page.getByRole("tab", { name: /OpenMind Forge/ }).click();
+  await expect(page.getByRole("textbox", { name: "OpenMind Forge command" })).toBeVisible();
+  await expect(page.locator(".terminal-prompt")).toContainText("~/delivery/tickets");
+  const reloaded = page.getByRole("textbox", { name: "OpenMind Forge command" });
+  await reloaded.fill("cat ../notes/qa/plan.txt");
+  await reloaded.press("Enter");
+  await expect(page.locator(".terminal-output")).toContainText("review APP-101");
+});
+
 test("uses both provider CLIs and completes a ticket from a natural-language prompt", async ({ page }) => {
   test.setTimeout(35_000);
   await page.goto("/");
