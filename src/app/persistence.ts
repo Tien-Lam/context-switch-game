@@ -337,13 +337,21 @@ export function serialiseSave(game: GameState, savedAt: number, sequence?: numbe
 
 export function saveGame(game: GameState, savedAt = Date.now()) {
   const envelope: SaveRecord = { id: SAVE_ID, version: SAVE_VERSION, savedAt, snapshotSequence: ++snapshotSequence, game };
+  let emergencyWritten = false;
   try {
     // Keep the latest snapshot available even if the tab closes before IndexedDB finishes.
     localStorage.setItem(EMERGENCY_KEY, serialiseSave(game, savedAt, envelope.snapshotSequence));
+    emergencyWritten = true;
   } catch {
     // IndexedDB remains the second persistence path.
   }
-  const operation = saveQueue.then(async () => { await getDatabase().saves.put(envelope); });
+  const operation = saveQueue.then(async () => {
+    try {
+      await getDatabase().saves.put(envelope);
+    } catch {
+      if (!emergencyWritten) throw new Error("Neither browser storage backend could save this run.");
+    }
+  });
   saveQueue = operation.catch(() => {});
   return operation;
 }

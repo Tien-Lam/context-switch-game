@@ -53,6 +53,8 @@ mise exec -- bun run check
 
 `mise exec -- bun run build` creates a static site in `dist/`. The build uses relative asset paths so it can be served from a domain root or a subdirectory. Serve the directory over HTTPS with any static host; the game uses browser-local IndexedDB and localStorage for saves. Export a save before clearing site data or switching browsers. The game has no server or external AI dependency.
 
+Either save backend can preserve progress if the other is unavailable. If both are denied, play, restart and valid imports still work in memory; a warning explicitly says the run is not saved. Export the game save before closing or reloading. Export does not include terminal history or sandbox files.
+
 The `main` branch publishes the game to GitHub Pages through [the Pages workflow](.github/workflows/pages.yml). The workflow installs the tools from `mise.toml`, runs the quality gate, and deploys `dist/`. GitHub Pages must use **GitHub Actions** as its publishing source. The browser stores saves per site origin, so a save from a local preview does not appear on the hosted site unless it is exported and imported.
 
 This is a scripted local alpha with 16 main-route tickets and seven conditional repair tickets across two chapters. Real-player timing and overall pacing remain to be validated before a wider release.

@@ -88,10 +88,25 @@ describe("save envelope", () => {
     await saveGame(initial, 1_000);
     databaseStorage.failWrites = true;
     const assigned = startTicket(initial, 0, "deployment-banner", "ballad");
-    await expect(saveGame(assigned, 1_000)).rejects.toThrow("Database unavailable");
+    await expect(saveGame(assigned, 1_000)).resolves.toBeUndefined();
 
     expect(databaseStorage.record?.game.sessions[0].status).toBe("idle");
     expect((await loadGame())?.game).toEqual(assigned);
+  });
+
+  it("rejects when both storage writes fail and recovers on the next save", async () => {
+    const storage = emergencyStorage();
+    storage.failWrites();
+    databaseStorage.failWrites = true;
+    const game = createInitialState();
+
+    await expect(saveGame(game, 1_000)).rejects.toThrow("Neither browser storage backend");
+    expect(storage.read()).toBeNull();
+    expect(databaseStorage.record).toBeNull();
+
+    databaseStorage.failWrites = false;
+    await expect(saveGame(game, 2_000)).resolves.toBeUndefined();
+    expect((await loadGame())?.game).toEqual(game);
   });
 
   it("seeds command ordering from both valid storage records after loading", async () => {

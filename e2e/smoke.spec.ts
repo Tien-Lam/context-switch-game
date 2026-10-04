@@ -113,6 +113,60 @@ test("unavailable browser storage does not prevent shell launch or a playable se
   await expect(page.locator(".terminal-contextbar")).toContainText("1/1 slots");
 });
 
+test("denied primary and emergency storage preserves play and resets the workspace on restart and valid import", async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  await page.addInitScript(() => {
+    for (const name of ["getItem", "setItem", "removeItem"] as const) {
+      Storage.prototype[name] = () => { throw new DOMException("Storage unavailable", "SecurityError"); };
+    }
+    Object.defineProperty(window, "indexedDB", { configurable: true, get() { throw new DOMException("Database unavailable", "SecurityError"); } });
+  });
+  await page.goto("/");
+  await launchInTab(page, 1, "anthill");
+  const agent = page.getByRole("textbox", { name: "Anthill Code message" });
+  await agent.fill("Could you take the next ticket?");
+  await agent.press("Enter");
+  await expect(page.locator(".terminal-contextbar")).toContainText("1/1 slots");
+  await expect(page.locator(".toast")).toContainText(/not saved/i);
+  await page.getByRole("button", { name: "Terminal", exact: true }).click();
+  const command = page.getByRole("textbox", { name: "Anthill Code command" });
+  await command.fill("touch notes/unsaved.txt; cd notes");
+  await command.press("Enter");
+  await command.fill("restart --confirm");
+  await command.press("Enter");
+  await expect(page.getByRole("textbox", { name: "Terminal command" })).toBeVisible();
+  await expect(page.locator(".terminal-contextbar")).toContainText("0 shipped");
+  await expect(page.locator(".terminal-prompt")).toContainText("~/delivery");
+  await expect(page.getByRole("tab", { name: /Anthill Code/ })).toHaveCount(0);
+  await expect(page.locator(".toast")).toContainText(/not saved/i);
+  const shell = page.getByRole("textbox", { name: "Terminal command" });
+  await shell.fill("cat notes/unsaved.txt");
+  await shell.press("Enter");
+  await expect(page.locator(".line-error").last()).toContainText("no such file");
+  await shell.fill("touch notes/import-marker.txt; cd notes");
+  await shell.press("Enter");
+  await shell.fill("forge");
+  await shell.press("Enter");
+  await expect(page.getByRole("textbox", { name: "OpenMind Forge message" })).toBeVisible();
+  page.on("dialog", (dialog) => void dialog.accept());
+  const chooserPromise = page.waitForEvent("filechooser");
+  await page.getByRole("textbox", { name: "OpenMind Forge message" }).fill("save import");
+  await page.getByRole("textbox", { name: "OpenMind Forge message" }).press("Enter");
+  const chooser = await chooserPromise;
+  await chooser.setFiles({ name: "fresh.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ version: 8, savedAt: Date.now(), game: createInitialState() })) });
+  await expect(page.getByRole("textbox", { name: "Terminal command" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /OpenMind Forge/ })).toHaveCount(0);
+  await expect(page.locator(".terminal-prompt")).toContainText("~/delivery");
+  await expect(page.locator(".toast")).toContainText(/not saved/i);
+  await shell.fill("cat notes/import-marker.txt");
+  await shell.press("Enter");
+  await expect(page.locator(".line-error").last()).toContainText("no such file");
+  await page.waitForTimeout(5_200); // Exercise the periodic autosave while both backends are denied.
+  await expect(page.locator(".toast")).toContainText(/not saved/i);
+  expect(pageErrors).toEqual([]);
+});
+
 test("history recalls the newest command on the first Up after reaching its cap", async ({ page }) => {
   await page.goto("/");
   const shell = page.getByRole("textbox", { name: "Terminal command" });

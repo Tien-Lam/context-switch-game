@@ -36,11 +36,22 @@ function messageFrom(error: unknown) {
 }
 
 export const useGameStore = create<GameStore>((set, get) => {
+  const storageNotice = "Browser storage is unavailable. This run is not saved and is only in memory; export a save before closing or reloading.";
+  let saveRequest = 0;
+  const saveSnapshot = async (game: GameState, savedAt: number) => {
+    const request = ++saveRequest;
+    try {
+      await saveGame(game, savedAt);
+      if (request === saveRequest && get().notice === storageNotice) set({ notice: null });
+    } catch {
+      if (request === saveRequest) set({ notice: storageNotice });
+    }
+  };
   const commit = (command: (state: GameState) => GameState): string | null => {
     try {
       const next = command(get().game);
       set({ game: next, notice: null });
-      void saveGame(next, get().lastWallClock);
+      void saveSnapshot(next, get().lastWallClock);
       return null;
     } catch (error) {
       const message = messageFrom(error);
@@ -82,11 +93,11 @@ export const useGameStore = create<GameStore>((set, get) => {
       const elapsed = Math.min(BALANCE.offlineCapSeconds, Math.max(0, (now - store.lastWallClock) / 1000));
       const next = advanceGame(store.game, elapsed);
       set({ game: next, lastWallClock: now, offlineSeconds: elapsed >= 5 ? elapsed : 0 });
-      void saveGame(next, now);
+      void saveSnapshot(next, now);
     },
     persist: async () => {
       const store = get();
-      await saveGame(store.game, store.lastWallClock);
+      await saveSnapshot(store.game, store.lastWallClock);
     },
     setSpeed: (speed) => set({ speed }),
     assign: (sessionId, ticketId, modelId, improveBrief, reasoning) => commit((state) => startTicket(state, sessionId, ticketId, modelId, improveBrief, reasoning)),
@@ -102,8 +113,9 @@ export const useGameStore = create<GameStore>((set, get) => {
     importSave: async (serialised) => {
       try {
         const envelope = parseSave(serialised);
-        set({ game: envelope.game, lastWallClock: Date.now(), notice: "Save imported." });
-        await saveGame(envelope.game);
+        const now = Date.now();
+        set({ game: envelope.game, lastWallClock: now, notice: "Save imported." });
+        await saveSnapshot(envelope.game, now);
         return true;
       } catch (error) {
         set({ notice: messageFrom(error) });
@@ -111,10 +123,11 @@ export const useGameStore = create<GameStore>((set, get) => {
       }
     },
     restart: async () => {
-      await clearSave();
+      try { await clearSave(); } catch { /* Resetting the in-memory run can still proceed. */ }
       const game = createInitialState();
-      set({ game, lastWallClock: Date.now(), offlineSeconds: 0, notice: null, speed: 1 });
-      await saveGame(game);
+      const now = Date.now();
+      set({ game, lastWallClock: now, offlineSeconds: 0, notice: null, speed: 1 });
+      await saveSnapshot(game, now);
     },
   };
 });
