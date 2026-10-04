@@ -1,8 +1,10 @@
 import { produce } from "immer";
 import { content, modelById, providerById, ticketById, upgradeById } from "../content";
+import { CACHE_DECISIONS } from "../content/cacheDecisions";
 import { BALANCE } from "./balance";
+import { getCacheRevisionQuote } from "./decisionDepth";
 import { availableTickets, incidentIsOpen, isModelUnlocked, isReviewBlocked, reviewRiskFactorList } from "./selectors";
-import type { EndingState, GameEvent, GameState, IncidentMitigation, ReviewDecision, SessionState } from "./types";
+import type { CacheRevisionOptions, EndingState, GameEvent, GameState, IncidentMitigation, ReviewDecision, SessionState } from "./types";
 
 export class GameRuleError extends Error {}
 
@@ -37,7 +39,21 @@ function resetSession(session: SessionState) {
   session.reviewRound = 0;
   session.workedInParallel = false;
   session.reasoning = "medium";
+  session.cacheRemedy = null;
+  session.cacheWorkflow = null;
+  session.workDuration = null;
+  session.supportForSessionId = null;
   session.context = clamp(session.context + 2, 0, 100);
+}
+
+function releaseSupport(state: GameState, owner: SessionState) {
+  for (const helper of state.sessions) {
+    if (helper.supportForSessionId === owner.id) resetSession(helper);
+  }
+}
+
+function workDuration(session: SessionState, duration: number, speed: number) {
+  return session.workDuration ?? duration / speed;
 }
 
 function calculateReviewRisk(state: GameState, session: SessionState) {
@@ -54,17 +70,22 @@ function calculateReviewRisk(state: GameState, session: SessionState) {
   const revisionBonus = session.reviewRound * 0.18;
   const healthPenalty = Math.max(0, 70 - state.repoHealth) / 220;
 
-  return clamp(
+  // Quota-starved work may be integrated in different frame sizes. Quantize only
+  // the decision score so floating-point noise cannot flip an exact gate boundary.
+  return Math.round(clamp(
     ticket.baseRisk + model.riskModifier + reasoningModifier + contextPenalty + parallelPenalty + healthPenalty
       - briefingBonus - playbookBonus - testBonus - integrityBonus - revisionBonus,
     0.02,
     0.92,
-  );
+  ) * 1e9) / 1e9;
 }
 
 export function computeEnding(state: GameState): EndingState {
   const reliability = clamp(Math.round(state.repoHealth - state.stats.defects * 7), 0, 100);
-  const mainTicketsShipped = state.completedTicketIds.filter((id) => !ticketById.get(id)?.incidentFor).length;
+  const mainTicketsShipped = state.completedTicketIds.filter((id) => {
+    const ticket = ticketById.get(id);
+    return !ticket?.incidentFor && !ticket?.optional;
+  }).length;
   const elapsedTimePenalty = Math.max(0, (state.gameTime - 180) / 60);
   const throughput = clamp(Math.round(
     mainTicketsShipped * 5 - state.stats.revisions * 1.5 - state.stats.escalations * 2.5
@@ -79,7 +100,10 @@ export function computeEnding(state: GameState): EndingState {
       ? "The release works. Legal has follow-up questions."
       : "The release works, provided nobody refreshes twice.";
   const consequences = [
-    incidentIsOpen(state, "cache-shortcut") ? "the dashboard cache still served stale data" : state.flags.cacheShortcut ? "the cache shortcut was repaired" : "the cache audit stayed clean",
+    incidentIsOpen(state, "cache-shortcut") ? "the dashboard cache still served stale data"
+      : state.cacheOutcome === "bypassed" ? "customer data stayed fresh, with dashboard speed deferred by the safe bypass"
+      : state.cacheOutcome === "restored" ? "customer data stayed fresh and the dashboard speedup held"
+      : state.flags.cacheShortcut ? "the cache shortcut was repaired" : "the cache audit stayed clean",
     incidentIsOpen(state, "privacy-default") ? "telemetry still had the wrong default" : state.flags.privacyDefaultedOn ? "the privacy default was repaired" : "the privacy default held",
     incidentIsOpen(state, "runtime-drift") ? "the legacy worker survived the audit" : state.flags.runtimeDriftAccepted ? "the legacy worker was removed" : "the runtime started cleanly",
     incidentIsOpen(state, "merge-race") ? "the report race reached production" : state.flags.raceAccepted ? "the export race was repaired" : "parallel exports remained isolated",
@@ -151,7 +175,9 @@ function announceIncidentIfReady(state: GameState) {
       title: "Pre-demo freshness audit passed",
       message: state.flags.cacheShortcut
         ? "Support could not reproduce stale summaries after FIX-204 repaired the shortcut. +2 trust."
-        : "Support tried to reproduce stale customer summaries and failed. The PERF-204 review prevented an incident. +2 trust.",
+        : state.cacheOutcome === "bypassed"
+          ? "Support verified fresh customer summaries through direct reads. The safe PERF-204 bypass prevented stale data; the dashboard remains slower. PERF-205 is optional. +2 trust."
+          : "Support tried to reproduce stale customer summaries and failed. The PERF-204 review kept customer data fresh and the dashboard fast. +2 trust.",
     });
     return;
   }
@@ -244,6 +270,7 @@ function completeTicket(state: GameState, session: SessionState, defect: boolean
   const ticket = ticketById.get(session.ticketId ?? "");
   const providerId = modelById.get(session.modelId ?? "")?.providerId;
   if (!ticket) throw new GameRuleError("Ticket no longer exists.");
+  releaseSupport(state, session);
   if (ticket.incidentFor && defect) {
     state.stats.defects += 1;
     state.trust = clamp(state.trust - 6, 0, 100);
@@ -262,15 +289,22 @@ function completeTicket(state: GameState, session: SessionState, defect: boolean
   const repairingIncident = ticket.incidentFor && incidentIsOpen(state, ticket.incidentFor);
   if (!state.completedTicketIds.includes(ticket.id)) state.completedTicketIds.push(ticket.id);
   state.stats.shipped += 1;
-  const earnedTrust = rewardTrust ? ticket.rewardTrust : 0;
+  const deliveredReward = ticket.id === "cache-summary" && session.cacheRemedy === "bypass" ? CACHE_DECISIONS.bypass.rewardTrust : ticket.rewardTrust;
+  const earnedTrust = rewardTrust ? deliveredReward : 0;
   state.trust = clamp(state.trust + earnedTrust - (defect ? 6 : 0), 0, 100);
   state.peakTrust = Math.max(state.peakTrust, state.trust);
   state.repoHealth = clamp(state.repoHealth + (defect ? -7 : 2.5), 0, 100);
   state.debt = clamp(state.debt + (defect ? 9 : -1.5), 0, 100);
 
+  if (ticket.id === "cache-summary" && session.cacheRemedy === "bypass") {
+    state.cacheOutcome = "bypassed";
+  } else if (!defect && (ticket.id === "cache-summary" || ticket.incidentFor === "cache-shortcut" || ticket.id === CACHE_DECISIONS.followup.id)) {
+    state.cacheOutcome = "restored";
+  }
+
   if (defect) {
     state.stats.defects += 1;
-    if (ticket.riskFlag === "cache-shortcut") state.flags.cacheShortcut = true;
+    if (ticket.riskFlag === "cache-shortcut" && session.cacheRemedy !== "bypass") state.flags.cacheShortcut = true;
     if (ticket.riskFlag === "privacy-default") state.flags.privacyDefaultedOn = true;
     if (ticket.riskFlag === "runtime-drift") state.flags.runtimeDriftAccepted = true;
     if (ticket.riskFlag === "merge-race") state.flags.raceAccepted = true;
@@ -287,7 +321,7 @@ function completeTicket(state: GameState, session: SessionState, defect: boolean
     message: defect
       ? "The patch is live, but the review left a visible risk unresolved. Future work may inherit it."
       : rewardTrust
-        ? `Clean delivery. +${ticket.rewardTrust} trust and a slightly healthier repository.`
+        ? `Clean delivery. +${deliveredReward} trust and a slightly healthier repository.${ticket.id === "cache-summary" && session.cacheRemedy === "bypass" ? " Customer data is fresh; the dashboard speedup is deferred to optional PERF-205." : ""}`
         : "Senior review secured the delivery, but the interruption earned no delivery trust.",
   });
   if (repairingIncident) {
@@ -302,7 +336,7 @@ function completeTicket(state: GameState, session: SessionState, defect: boolean
       message: "The follow-up fix closed the known defect, restored repository health, and reduced debt.",
     });
   }
-  if (defect && ticket.riskFlag !== "none") {
+  if (defect && ticket.riskFlag !== "none" && !(ticket.id === "cache-summary" && session.cacheRemedy === "bypass")) {
     const repair = content.tickets.find((candidate) => candidate.incidentFor === ticket.riskFlag);
     const missingPrerequisites = repair?.prerequisites.filter((id) => !state.completedTicketIds.includes(id)) ?? [];
     const blockedIncident = repair?.blockedByIncident && incidentIsOpen(state, repair.blockedByIncident);
@@ -396,6 +430,10 @@ export function startTicket(
     target.briefImproved = improveBrief;
     target.workedInParallel = false;
     target.reasoning = reasoning;
+    target.cacheRemedy = null;
+    target.cacheWorkflow = null;
+    target.workDuration = null;
+    target.supportForSessionId = null;
     if (setupQuota) {
       state.providerQuota[model.providerId] -= setupQuota;
       state.stats.quotaSpent += setupQuota;
@@ -427,12 +465,13 @@ export function advanceGame(source: GameState, elapsedSeconds: number) {
       });
 
       const alreadyComplete = active.filter(({ session, ticket, model }) =>
-        ((1 - session.progress) * ticket.duration) / model.speed <= SIMULATION_EPSILON,
+        (1 - session.progress) * workDuration(session, ticket.duration, model.speed) <= SIMULATION_EPSILON,
       );
       if (alreadyComplete.length) {
         for (const { session, ticket, model } of alreadyComplete) {
           session.progress = 1;
           session.status = "awaiting-review";
+          releaseSupport(state, session);
           state.reviews.push({
             id: `${ticket.id}-${session.reviewRound}-${Math.round(state.gameTime + SIMULATION_EPSILON)}`,
             ticketId: ticket.id,
@@ -446,7 +485,7 @@ export function advanceGame(source: GameState, elapsedSeconds: number) {
             sessionId: session.id,
             tone: "info",
             title: `${ticket.key} is ready for review`,
-            message: `${model.name} is ${Math.round(session.context)}% context-coherent and ${Math.round((1 - state.reviews.at(-1)!.risk) * 100)}% confident.`,
+            message: `${model.name} is ${Math.round(session.context + SIMULATION_EPSILON)}% context-coherent and ${Math.round((1 - state.reviews.at(-1)!.risk) * 100 + SIMULATION_EPSILON)}% confident.`,
           });
         }
         continue;
@@ -460,10 +499,13 @@ export function advanceGame(source: GameState, elapsedSeconds: number) {
       }
 
       const workFraction = new Map<string, number>();
+      const quotaDemand = ({ session, model }: (typeof active)[number]) => model.quotaRate * (
+        state.sessions.some((helper) => helper.status === "supporting" && helper.supportForSessionId === session.id) ? 1 + CACHE_DECISIONS.helperQuotaMultiplier : 1
+      );
       let stepSeconds = remainingSeconds;
       for (const provider of content.providers) {
         const group = providerWork.get(provider.id) ?? [];
-        const demand = group.reduce((total, { model }) => total + model.quotaRate, 0);
+        const demand = group.reduce((total, work) => total + quotaDemand(work), 0);
         let quota = clamp(state.providerQuota[provider.id] ?? 0, 0, quotaMax(state, provider.id));
         if (quota <= SIMULATION_EPSILON && demand > provider.regenPerSecond) quota = 0;
         state.providerQuota[provider.id] = quota;
@@ -478,7 +520,7 @@ export function advanceGame(source: GameState, elapsedSeconds: number) {
         }
         if (fraction > 0) {
           for (const { session, ticket, model } of group) {
-            const workNeeded = ((1 - session.progress) * ticket.duration) / model.speed;
+            const workNeeded = (1 - session.progress) * workDuration(session, ticket.duration, model.speed);
             stepSeconds = Math.min(stepSeconds, workNeeded / fraction);
           }
         }
@@ -489,7 +531,7 @@ export function advanceGame(source: GameState, elapsedSeconds: number) {
         // Snap depleted pools to zero, then recalculate their constrained work rate.
         for (const provider of content.providers) {
           const group = providerWork.get(provider.id) ?? [];
-          const demand = group.reduce((total, { model }) => total + model.quotaRate, 0);
+          const demand = group.reduce((total, work) => total + quotaDemand(work), 0);
           if (demand > provider.regenPerSecond && (state.providerQuota[provider.id] ?? 0) <= SIMULATION_EPSILON) {
             state.providerQuota[provider.id] = 0;
           }
@@ -505,7 +547,7 @@ export function advanceGame(source: GameState, elapsedSeconds: number) {
       for (const provider of content.providers) {
         const group = providerWork.get(provider.id) ?? [];
         const fraction = workFraction.get(provider.id) ?? 1;
-        const demand = group.reduce((total, { model }) => total + model.quotaRate, 0);
+        const demand = group.reduce((total, work) => total + quotaDemand(work), 0);
         const spent = demand * fraction * stepSeconds;
         state.providerQuota[provider.id] = clamp(
           (state.providerQuota[provider.id] ?? 0) + provider.regenPerSecond * stepSeconds - spent,
@@ -526,7 +568,7 @@ export function advanceGame(source: GameState, elapsedSeconds: number) {
           }
           session.status = constrained ? "quota-paused" : "working";
           const workSeconds = stepSeconds * fraction;
-          session.progress = clamp(session.progress + (workSeconds * model.speed) / ticket.duration, 0, 1);
+          session.progress = clamp(session.progress + workSeconds / workDuration(session, ticket.duration, model.speed), 0, 1);
           const decayMultiplier = hasUpgrade(state, "context-notes") ? 0.55 : 1;
           session.context = clamp(session.context - workSeconds * model.contextDecay * BALANCE.contextDecayPerWorkSecond * decayMultiplier, 0, 100);
         }
@@ -540,6 +582,7 @@ export function advanceGame(source: GameState, elapsedSeconds: number) {
       for (const { session, ticket, model } of completed) {
         session.progress = 1;
         session.status = "awaiting-review";
+        releaseSupport(state, session);
         state.reviews.push({
           id: `${ticket.id}-${session.reviewRound}-${Math.round(state.gameTime + SIMULATION_EPSILON)}`,
           ticketId: ticket.id,
@@ -553,7 +596,7 @@ export function advanceGame(source: GameState, elapsedSeconds: number) {
           sessionId: session.id,
           tone: "info",
           title: `${ticket.key} is ready for review`,
-          message: `${model.name} is ${Math.round(session.context)}% context-coherent and ${Math.round((1 - state.reviews.at(-1)!.risk) * 100)}% confident.`,
+          message: `${model.name} is ${Math.round(session.context + SIMULATION_EPSILON)}% context-coherent and ${Math.round((1 - state.reviews.at(-1)!.risk) * 100 + SIMULATION_EPSILON)}% confident.`,
         });
       }
     }
@@ -561,9 +604,29 @@ export function advanceGame(source: GameState, elapsedSeconds: number) {
   });
 }
 
-export function reviewTicket(source: GameState, reviewId: string, decision: ReviewDecision) {
+export function reviewTicket(source: GameState, reviewId: string, decision: ReviewDecision, options?: CacheRevisionOptions) {
   const review = source.reviews.find((candidate) => candidate.id === reviewId);
   if (!review) throw new GameRuleError("That review is no longer available.");
+  if (options && (decision !== "revise" || review.ticketId !== "cache-summary")) {
+    throw new GameRuleError("Cache scope and workflow choices apply only to a PERF-204 revision.");
+  }
+  if (options && options.remedy !== "restore" && options.remedy !== "bypass") {
+    throw new GameRuleError("Choose restore or bypass for the cache remedy.");
+  }
+  if (options && options.workflow !== undefined && options.workflow !== "ledger" && options.workflow !== "probes") {
+    throw new GameRuleError("Choose ledger or probes for the cache workflow.");
+  }
+  if (options?.remedy === "bypass" && options.workflow) {
+    throw new GameRuleError("A bypass has no restoration workflow; omit ledger or probes.");
+  }
+  const quote = decision === "revise" ? getCacheRevisionQuote(source, reviewId, options) : null;
+  if (quote?.helperNeeded && quote.helperSessionId === null) {
+    throw new GameRuleError("Probes require one free unlocked supporting session; choose ledger or free a slot.");
+  }
+  const providerId = modelById.get(source.sessions[review.sessionId]?.modelId ?? "")?.providerId;
+  if (quote && (source.providerQuota[providerId ?? ""] ?? 0) < quote.setupQuota) {
+    throw new GameRuleError(`The ledger requires ${quote.setupQuota} provider quota upfront; choose probes or wait for quota.`);
+  }
   if (decision === "escalate" && source.trust < BALANCE.escalationTrustCost) {
     throw new GameRuleError(`Escalation requires ${BALANCE.escalationTrustCost} trust.`);
   }
@@ -578,8 +641,35 @@ export function reviewTicket(source: GameState, reviewId: string, decision: Revi
     if (decision === "revise") {
       state.stats.revisions += 1;
       session.status = "working";
-      session.progress = 0.62;
       session.reviewRound += 1;
+      if (quote) {
+        releaseSupport(state, session);
+        session.progress = 0;
+        session.cacheRemedy = quote.remedy;
+        session.cacheWorkflow = quote.workflow;
+        session.workDuration = quote.seconds;
+        session.context = clamp(session.context + quote.contextGain, 0, 100);
+        if (quote.setupQuota && providerId) {
+          state.providerQuota[providerId] -= quote.setupQuota;
+          state.stats.quotaSpent += quote.setupQuota;
+        }
+        if (quote.helperSessionId !== null) {
+          const helper = state.sessions[quote.helperSessionId];
+          helper.status = "supporting";
+          helper.ticketId = null;
+          helper.modelId = session.modelId;
+          helper.supportForSessionId = session.id;
+          helper.progress = 0;
+        }
+        addEvent(state, {
+          providerId, sessionId: session.id, tone: "info", title: `${ticket.key} ${quote.remedy} requested`,
+          message: `${quote.remedy === "bypass"
+            ? `The agent will remove cached reads and check fresh direct reads. Dashboard speed is deferred; clean delivery earns ${quote.rewardTrust} trust.`
+            : `The agent will restore invalidation and verify customer writes using ${quote.workflow}; the speedup remains in scope.`} ${quote.seconds}s of work, ${quote.setupQuota} upfront quota.${quote.fallbackReason ? ` ${quote.fallbackReason}` : ""}`,
+        });
+        return;
+      }
+      session.progress = 0.62;
       session.context = clamp(session.context + 6, 0, 100);
       addEvent(state, { providerId: modelById.get(session.modelId ?? "")?.providerId, sessionId: session.id, tone: "info", title: `${ticket.key} changes requested`, message: "The agent is addressing the visible risk with a narrower second pass." });
       return;

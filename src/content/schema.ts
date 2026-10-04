@@ -50,6 +50,7 @@ export const TicketSchema = z.object({
   riskFlag: z.enum(["cache-shortcut", "privacy-default", "merge-race", "runtime-drift", "test-integrity", "contract-mismatch", "request-loop", "none"]),
   incidentFor: z.enum(["cache-shortcut", "privacy-default", "merge-race", "runtime-drift", "test-integrity", "contract-mismatch", "request-loop"]).optional(),
   blockedByIncident: z.enum(["cache-shortcut", "privacy-default", "merge-race", "runtime-drift", "test-integrity", "contract-mismatch", "request-loop"]).optional(),
+  optional: z.boolean().optional(),
 });
 
 export const UpgradeSchema = z.object({

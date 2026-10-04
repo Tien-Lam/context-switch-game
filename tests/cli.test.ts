@@ -1,9 +1,215 @@
 import { describe, expect, it } from "vitest";
 import { createInitialState } from "../src/game/initialState";
-import { advanceGame, buyUpgrade, startTicket } from "../src/game/engine";
+import { advanceGame, buyUpgrade, reviewTicket, startTicket } from "../src/game/engine";
 import { agentSuggestions, commandSuggestions, evaluateAgentMessage, evaluateCommand } from "../src/ui/cli";
 
 describe("operator CLI", () => {
+  function cacheReview(modelId = "ballad") {
+    const initial = createInitialState();
+    initial.completedTicketIds = ["deployment-banner"];
+    initial.unlockedSessions = 2;
+    return structuredClone(advanceGame(startTicket(initial, 0, "cache-summary", modelId), 10));
+  }
+
+  it("preserves prior bypass scope on non-specific natural revisions and suggests approval once checked", () => {
+    const state = cacheReview();
+    const checked = advanceGame(reviewTicket(state, state.reviews[0].id, "revise", { remedy: "bypass" }), 2);
+    for (const request of ["Please revise the cache", "Please revise this cache review", "Revise PERF-204 with the same cache scope"]) {
+      expect(evaluateAgentMessage(request, checked).effect).toEqual({ type: "review", reviewId: checked.reviews[0].id, decision: "revise" });
+    }
+    expect(agentSuggestions("anthill", checked)).toContain("Approve PERF-204");
+    expect(commandSuggestions("anthill", checked)).toContain("reviews approve PERF-204");
+  });
+
+  it("never uses a prohibited workflow through a provider default", () => {
+    for (const modelId of ["ballad", "spark"]) {
+      const state = cacheReview(modelId);
+      for (const request of ["Restore invalidation but not probes", "Restore invalidation without probes", "Restore invalidation with no probes", "Restore invalidation rather than probes", "Restore invalidation but do not use probes", "Restore invalidation never use probes", "Restore invalidation avoid probes"]) {
+        const effect = evaluateAgentMessage(request, state).effect;
+        if (effect) expect(effect).toMatchObject({ type: "review", options: { remedy: "restore", workflow: "ledger" } });
+      }
+      expect(evaluateAgentMessage("Use probes, not probes", state).effect).toBeUndefined();
+      for (const request of ["Bypass the cache but not bypass the cache", "Restore invalidation but not restore invalidation", "Use ledger but not restore invalidation"]) expect(evaluateAgentMessage(request, state).effect).toBeUndefined();
+      expect(evaluateAgentMessage("Restore invalidation with no ledger", state).effect).toMatchObject({ options: { remedy: "restore", workflow: "probes" } });
+    }
+  });
+
+  it("accepts cache remedies and workflow overrides through exact terminal commands", () => {
+    const state = cacheReview();
+    for (const [command, options] of [
+      ["reviews revise PERF-204 --remedy restore --workflow ledger", { remedy: "restore", workflow: "ledger" }],
+      ["reviews revise PERF-204 --remedy=restore --workflow=probes", { remedy: "restore", workflow: "probes" }],
+      ["reviews revise PERF-204 --workflow probes", { remedy: "restore", workflow: "probes" }],
+      ["reviews revise PERF-204 --remedy bypass", { remedy: "bypass" }],
+    ] as const) {
+      expect(evaluateCommand(command, state, undefined, true).effect, command).toEqual({ type: "review", reviewId: state.reviews[0].id, decision: "revise", options });
+    }
+    const bypass = evaluateCommand("reviews revise PERF-204 --remedy bypass", state, undefined, true).messages[0].text;
+    expect(bypass).toContain("1.5s work");
+    expect(bypass).toContain("dashboard speed deferred");
+    expect(bypass).toContain("7-trust reward, optional PERF-205");
+  });
+
+  it("accepts natural cache scope and workflow requests without exact syntax", () => {
+    const state = cacheReview();
+    for (const [request, options] of [
+      ["Restore invalidation for PERF-204", { remedy: "restore" }],
+      ["Could you restore invalidation for PERF-204?", { remedy: "restore" }],
+      ["Bypass the cache for now", { remedy: "bypass" }],
+      ["Please remove cache for now", { remedy: "bypass" }],
+      ["Use isolated probes for PERF-204", { remedy: "restore", workflow: "probes" }],
+      ["Use a contract ledger", { remedy: "restore", workflow: "ledger" }],
+      ["Please revise PERF-204 with isolated probes", { remedy: "restore", workflow: "probes" }],
+    ] as const) {
+      expect(evaluateAgentMessage(request, state).effect, request).toEqual({ type: "review", reviewId: state.reviews[0].id, decision: "revise", options });
+    }
+    expect(evaluateCommand("Restore invalidation for PERF-204", state, undefined, true).messages[0].kind).toBe("error");
+  });
+
+  it("keeps cache inquiries and negated choices read-only", () => {
+    const state = cacheReview();
+    const before = JSON.stringify(state);
+    for (const request of ["Should we bypass the cache?", "What would this take?", "How much does a contract ledger cost?", "Tell me about isolated probes", "Don't bypass the cache", "Please do not restore invalidation", "Avoid using probes for PERF-204", "I do not want you to remove the cache"]) {
+      expect(evaluateAgentMessage(request, state).effect, request).toBeUndefined();
+    }
+    expect(evaluateAgentMessage("What would this take?", state).messages[0].text).toContain("scope choices");
+    expect(JSON.stringify(state)).toBe(before);
+  });
+
+  it("uses the chosen cache remedy or workflow rather than its rejected alternative", () => {
+    const state = cacheReview();
+    for (const [request, options] of [
+      ["Restore invalidation rather than bypass the cache", { remedy: "restore" }],
+      ["Bypass the cache instead of restoring invalidation", { remedy: "bypass" }],
+      ["Use ledger, not probes", { remedy: "restore", workflow: "ledger" }],
+      ["Use the ledger rather than probes", { remedy: "restore", workflow: "ledger" }],
+      ["Use probes instead of the ledger", { remedy: "restore", workflow: "probes" }],
+      ["Please revise PERF-204 using ledger, not probes", { remedy: "restore", workflow: "ledger" }],
+      ["Use ledger; do not use probes", { remedy: "restore", workflow: "ledger" }],
+    ] as const) {
+      expect(evaluateAgentMessage(request, state).effect, request).toMatchObject({ type: "review", decision: "revise", options });
+    }
+  });
+
+  it("leaves uncertain cache decisions and explanatory questions unchanged", () => {
+    const state = cacheReview();
+    const before = JSON.stringify(state);
+    for (const request of ["Restore invalidation or bypass the cache", "Use probes or ledger", "Please revise PERF-204 using probes or ledger", "Bypass the cache? I am only asking what this costs", "Restore invalidation? No, just explain it", "Bypass the cache?", "Use ledger?", "Please explain whether we should restore invalidation"]) {
+      expect(evaluateAgentMessage(request, state).effect, request).toBeUndefined();
+    }
+    expect(evaluateAgentMessage("Restore invalidation or bypass the cache", state).messages[0].text).toContain("No cache revision started");
+    expect(evaluateAgentMessage("Bypass the cache? I am only asking what this costs", state).messages[0].text).toContain("scope choices");
+    expect(JSON.stringify(state)).toBe(before);
+    const checked = advanceGame(reviewTicket(state, state.reviews[0].id, "revise", { remedy: "bypass" }), 2);
+    const bypassed = reviewTicket(checked, checked.reviews[0].id, "approve");
+    expect(evaluateAgentMessage("Restore invalidation? No, just explain it", bypassed).effect).toBeUndefined();
+  });
+
+  it("rejects invalid, conflicting and unrelated cache revision flags", () => {
+    const state = cacheReview();
+    for (const command of ["reviews revise PERF-204 --remedy magic", "reviews revise PERF-204 --workflow fast", "reviews revise PERF-204 --remedy bypass --workflow ledger", "reviews revise PERF-204 --remedy", "reviews revise PERF-204 --workflow", "reviews revise PERF-204 --remedy=", "reviews revise PERF-204 --remdy restore", "reviews revise PERF-204 --remedy restore --remedy bypass", "reviews approve PERF-204 --remedy bypass"]) {
+      const result = evaluateCommand(command, state, undefined, true);
+      expect(result.effect, command).toBeUndefined();
+      expect(result.messages[0].kind, command).toBe("error");
+    }
+    const normal = advanceGame(startTicket(createInitialState(), 0, "deployment-banner", "ballad"), 5);
+    expect(evaluateCommand("reviews revise APP-101 --remedy bypass", normal, undefined, true).effect).toBeUndefined();
+    expect(evaluateAgentMessage("Restore invalidation for APP-101", normal).effect).toBeUndefined();
+    expect(evaluateCommand("reviews revise APP-101", normal, undefined, true).effect).toEqual({ type: "review", reviewId: normal.reviews[0].id, decision: "revise" });
+  });
+
+  it("describes provider workflow habits and their current resource implications", () => {
+    const anthill = cacheReview();
+    expect(evaluateCommand("reviews revise PERF-204", anthill).messages[0].text).toContain("restore / ledger · 5s work · 3 upfront quota");
+    const forge = cacheReview("spark");
+    const context = { providerId: "openmind", modelId: "spark" };
+    expect(evaluateCommand("reviews revise PERF-204", forge, context).messages[0].text).toContain("restore / probes · 3s work · 0 upfront quota · supporting session 2");
+    forge.sessions[1].status = "working";
+    forge.sessions[1].ticketId = "telemetry-toggle";
+    forge.sessions[1].modelId = "ballad";
+    expect(evaluateCommand("reviews revise PERF-204", forge, context).messages[0].text).toContain("restore / ledger");
+    expect(evaluateCommand("reviews revise PERF-204", forge, context).messages[0].text).toContain("No free supporting slot");
+    expect(evaluateCommand("reviews revise PERF-204 --workflow probes", forge, context).effect).toBeUndefined();
+    anthill.providerQuota.anthill = 2;
+    expect(evaluateCommand("reviews revise PERF-204 --workflow ledger", anthill).effect).toBeUndefined();
+  });
+
+  it("shows the actual cache remedy evidence after the revision finishes", () => {
+    for (const remedy of ["restore", "bypass"] as const) {
+      const state = cacheReview();
+      const ready = advanceGame(reviewTicket(state, state.reviews[0].id, "revise", { remedy }), 10);
+      const text = evaluateCommand("reviews read PERF-204", ready).messages[0].text;
+      expect(text).toContain("PASS:");
+      if (remedy === "bypass") {
+        expect(text.toLowerCase()).toContain("direct");
+        expect(text.toLowerCase()).toContain("slower");
+        expect(text).not.toContain("Every committed customer mutation invalidates");
+      } else expect(text.toLowerCase()).toContain("ledger");
+    }
+  });
+
+  it("offers scoped remedy suggestions at the cache review without approving for the player", () => {
+    const state = cacheReview();
+    expect(agentSuggestions("anthill", state)).toContain("Restore invalidation for PERF-204");
+    expect(agentSuggestions("anthill", state)).toContain("Bypass the cache for now");
+    expect(commandSuggestions("anthill", state)).toContain("reviews revise PERF-204 --remedy bypass");
+    expect(commandSuggestions("anthill", state)).not.toContain("reviews approve PERF-204");
+    expect(evaluateCommand("reviews read PERF-204", state).messages[0].text).toContain("I prefer a write-boundary ledger");
+    expect(evaluateCommand("reviews read PERF-204", cacheReview("spark")).messages[0].text).toContain("I prefer isolated probes");
+  });
+
+  it("reads the selected review from its suggested changed prompt with multiple pending reviews", () => {
+    const state = advanceGame(startTicket(cacheReview(), 1, "telemetry-toggle", "ballad"), 10);
+    expect(state.reviews).toHaveLength(2);
+    expect(agentSuggestions("anthill", state)).toContain("What changed in PERF-204?");
+    for (const key of ["PERF-204", "APP-118"]) {
+      const result = evaluateAgentMessage(`What changed in ${key}?`, state);
+      expect(result.effect).toBeUndefined();
+      expect(result.messages[0].text).toContain(`REVIEW ${key}`);
+    }
+  });
+
+  it("names supporting sessions and refuses to assign or compact their probe work", () => {
+    const state = cacheReview();
+    const supporting = reviewTicket(state, state.reviews[0].id, "revise", { remedy: "restore", workflow: "probes" });
+    expect(evaluateCommand("agents list", supporting).messages[0].text).toContain("isolated probes for session 1");
+    expect(evaluateCommand("agents run APP-118 --session 2", supporting).effect).toBeUndefined();
+    expect(evaluateCommand("/compact 2", supporting).effect).toBeUndefined();
+    expect(evaluateCommand("agents compact 2", supporting).effect).toBeUndefined();
+    expect(evaluateCommand("agents list", advanceGame(supporting, 1.5)).messages[0].text).toContain("isolated probes for session 1 · 50%");
+  });
+
+  it("marks optional tickets in terminal lists and details", () => {
+    const state = cacheReview();
+    const checked = advanceGame(reviewTicket(state, state.reviews[0].id, "revise", { remedy: "bypass" }), 2);
+    const bypassed = reviewTicket(checked, checked.reviews[0].id, "approve");
+    expect(evaluateCommand("tickets list", bypassed).messages[0].text).toContain("Restore the dashboard speedup [optional]");
+    expect(evaluateCommand("tickets read PERF-205", bypassed).messages[0].text).toContain("optional follow-up; not required to finish");
+    expect(evaluateCommand("tickets read APP-101", bypassed).messages[0].text).not.toContain("release     optional");
+  });
+
+  it("explains paid planning and reasoning at selection and assignment", () => {
+    const initial = createInitialState();
+    expect(evaluateCommand("/permissions plan", initial).messages[0].text).toContain("5 upfront provider quota");
+    const context = { providerId: "openmind", modelId: "spark", permissionMode: "plan" as const, reasoning: "high" as const };
+    expect(evaluateCommand("/reasoning high", initial, context).messages[0].text).toContain("4 extra upfront quota");
+    const assigned = evaluateAgentMessage("Please take the next ticket", initial, context).messages[0].text;
+    expect(assigned).toContain("5 upfront quota");
+    expect(assigned).toContain("4 extra upfront quota");
+  });
+
+  it("mentions branch contention only when the assignment will overlap without isolation", () => {
+    const initial = createInitialState();
+    initial.completedTicketIds = ["deployment-banner"];
+    initial.unlockedSessions = 2;
+    const running = startTicket(initial, 0, "telemetry-toggle", "ballad");
+    expect(evaluateCommand("agents run PERF-204", running).messages[0].text).toContain("contention adds review risk");
+    const isolated = structuredClone(running);
+    isolated.purchasedUpgradeIds.push("worktree-isolation");
+    expect(evaluateCommand("agents run PERF-204", isolated).messages[0].text).not.toContain("contention");
+    expect(evaluateCommand("agents run APP-101", createInitialState()).messages[0].text).not.toContain("contention");
+  });
+
   it("gives an actionable recovery path for sandbox-file requests in Agent mode", () => {
     for (const request of ["cat playtest.txt", "Please read playtest.txt", "ls"]) {
       const result = evaluateAgentMessage(request, createInitialState());

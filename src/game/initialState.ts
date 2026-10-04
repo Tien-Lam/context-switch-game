@@ -13,6 +13,10 @@ function createSession(id: number): SessionState {
     reviewRound: 0,
     workedInParallel: false,
     reasoning: "medium",
+    cacheRemedy: null,
+    cacheWorkflow: null,
+    workDuration: null,
+    supportForSessionId: null,
   };
 }
 
@@ -32,6 +36,7 @@ export function createInitialState(): GameState {
     reviews: [],
     incidentResponse: "none",
     incidentMitigation: "none",
+    cacheOutcome: "none",
     flags: {
       cacheShortcut: false,
       privacyDefaultedOn: false,

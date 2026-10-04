@@ -27,6 +27,10 @@ The investor demo is now a chapter break. Its follow-up pack starts with QA-401'
 
 The second shipment triggers a fictional Anthill plan change. Its quota reduction makes the independent OpenMind pool useful early in the shift. `trace` shows the current run's local events and counters. `sound on|off` and `motion reduce|auto` control optional review chimes and animation; the title bar exposes both settings. No usage data leaves the browser.
 
+PERF-204 now has two deliberate scope outcomes. Ask to **restore invalidation** to keep fresh, fast dashboard reads and the full 12-trust reward, or **bypass the cache for now** to deliver fresh-but-slower reads in a shorter pass for 7 trust. The bypass unlocks optional PERF-205 to restore performance for another 5 trust; the finale never requires it. Later audits and the ending remember the delivered scope.
+
+For restoration, Anthill prefers a **contract ledger** (5 seconds of work, 3 upfront provider quota, one slot, +12 context), while Forge prefers **isolated probes** (3 seconds of work, a supporting slot consuming half the model's quota rate, +3 context). Both accept either workflow. Forge explains its ledger fallback when no helper slot is available; explicitly requested probes require a free unlocked slot. Supporting work releases its slot at review and survives reload. Agent requests stay natural-language; Terminal supports `reviews revise PERF-204 --remedy restore|bypass [--workflow ledger|probes]`. Questions and ambiguous choices do not start a revision, and a generic additional pass preserves the chosen scope.
+
 The current terminal is a deterministic game shell rendered by the existing React interface. [Xterm.js](https://github.com/xtermjs/xterm.js) is a strong candidate if the game later needs ANSI escape sequences or full-screen terminal programs, but it is a terminal frontend, not a shell or command implementation. A full browser runtime such as [WebContainers](https://webcontainers.io/guides/quickstart) would add process execution and cross-origin-isolation requirements that this scripted, static-hosted alpha does not need.
 
 ## Pacing principle
@@ -57,7 +61,7 @@ Either save backend can preserve progress if the other is unavailable. If both a
 
 The `main` branch publishes the game to GitHub Pages through [the Pages workflow](.github/workflows/pages.yml). The workflow installs the tools from `mise.toml`, runs the quality gate, and deploys `dist/`. GitHub Pages must use **GitHub Actions** as its publishing source. The browser stores saves per site origin, so a save from a local preview does not appear on the hosted site unless it is exported and imported.
 
-This is a scripted local alpha with 16 main-route tickets and seven conditional repair tickets across two chapters. Real-player timing and overall pacing remain to be validated before a wider release.
+This is a scripted local alpha with 16 main-route tickets, seven conditional repair tickets and one optional performance follow-up across two chapters. Save envelopes are version 9 with sequential migration of earlier saves. Real-player timing and overall pacing remain to be validated before a wider release; agent review and browser playtesting do not establish human fun.
 
 Browser smoke tests, after Playwright's project-local browser is available:
 

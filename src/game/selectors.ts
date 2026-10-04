@@ -1,4 +1,5 @@
 import { content, modelById, providerById, ticketById } from "../content";
+import { CACHE_DECISIONS } from "../content/cacheDecisions";
 import { BALANCE } from "./balance";
 import type { GameState, ReviewState } from "./types";
 
@@ -60,7 +61,8 @@ export function availableTickets(state: GameState) {
   const complete = new Set(state.completedTicketIds);
 
   return content.tickets.filter((ticket) =>
-    (!ticket.incidentFor || incidentIsOpen(state, ticket.incidentFor))
+    (ticket.id !== CACHE_DECISIONS.followup.id || state.cacheOutcome === "bypassed")
+    && (!ticket.incidentFor || incidentIsOpen(state, ticket.incidentFor))
     && (!ticket.blockedByIncident || !incidentIsOpen(state, ticket.blockedByIncident))
     && (ticket.id !== "retry-repair" || !["active", "scaled"].includes(state.incidentResponse))
     &&
@@ -88,16 +90,20 @@ function flagToStateKey(flag: NonNullable<(typeof content.tickets)[number]["inci
 }
 
 export function visibleTickets(state: GameState) {
-  return content.tickets.filter((ticket) => !ticket.incidentFor || state.flags[flagToStateKey(ticket.incidentFor)]);
+  return content.tickets.filter((ticket) =>
+    (ticket.id !== CACHE_DECISIONS.followup.id || state.cacheOutcome === "bypassed" || state.completedTicketIds.includes(ticket.id))
+    && (!ticket.incidentFor || state.flags[flagToStateKey(ticket.incidentFor)]),
+  );
 }
 
 export function isReviewBlocked(state: GameState, review: ReviewState) {
   const ticket = ticketById.get(review.ticketId);
   const session = state.sessions[review.sessionId];
   if (!ticket || !session) return true;
-  if (review.risk >= 0.6) return true;
+  const risk = Math.round(review.risk * 1e9) / 1e9;
+  if (risk >= 0.6) return true;
   if (ticket.riskFlag === "none" || session.reviewRound > 0) return false;
-  return !(session.briefImproved && Boolean(ticket.evidence.resolution) && review.risk < 0.2);
+  return !(session.briefImproved && Boolean(ticket.evidence.resolution) && risk < 0.2);
 }
 
 export function reviewRiskFactorList(state: GameState, ticketId: string, sessionId: number) {
@@ -108,7 +114,8 @@ export function reviewRiskFactorList(state: GameState, ticketId: string, session
   const factors = [`ticket baseline ${Math.round(ticket.baseRisk * 100)}`];
   if (model.riskModifier > 0) factors.push(`${model.name} speed tradeoff +${Math.round(model.riskModifier * 100)}`);
   if (model.riskModifier < 0) factors.push(`${model.name} quality −${Math.round(Math.abs(model.riskModifier) * 100)}`);
-  if (session.context < 80) factors.push(`thin context ${Math.round(session.context)}%`);
+  const context = Math.round(session.context * 1e9) / 1e9;
+  if (context < 80) factors.push(`thin context ${Math.round(context)}%`);
   if (session.workedInParallel && !state.purchasedUpgradeIds.includes("worktree-isolation")) factors.push("shared branch contention");
   if (state.repoHealth < 70) factors.push(`repository health ${Math.round(state.repoHealth)}%`);
   if (session.reasoning === "low") factors.push("low reasoning +7");
@@ -129,6 +136,7 @@ export function ticketProgressLabel(state: GameState, ticketId: string) {
   const ticket = ticketById.get(ticketId);
   if (!ticket) return "Unknown";
   if (state.completedTicketIds.includes(ticketId)) return "Shipped";
+  if (ticketId === CACHE_DECISIONS.followup.id && state.cacheOutcome !== "bypassed") return "Dormant";
   if (ticket.incidentFor && !state.flags[flagToStateKey(ticket.incidentFor)]) return "Dormant";
   if (ticket.blockedByIncident && incidentIsOpen(state, ticket.blockedByIncident)) return "Blocked";
   if (ticketId === "retry-repair" && ["active", "scaled"].includes(state.incidentResponse)) return "Blocked";

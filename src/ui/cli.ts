@@ -1,7 +1,9 @@
 import { content, modelById, providerById, ticketById, upgradeById } from "../content";
+import { CACHE_DECISIONS, CACHE_EVIDENCE, CACHE_PROVIDER_HABITS } from "../content/cacheDecisions";
 import { BALANCE } from "../game/balance";
+import { getCacheRevisionQuote, getCacheReviewEvidence } from "../game/decisionDepth";
 import { availableModels, availableTickets, incidentIsOpen, isReviewBlocked, projectedTicketRisk, reviewRiskFactors, ticketProgressLabel, visibleTickets } from "../game/selectors";
-import type { GameState, IncidentMitigation, ReviewDecision } from "../game/types";
+import type { CacheRevisionOptions, GameState, IncidentMitigation, ReviewDecision } from "../game/types";
 
 export type PaneMode = "agents" | "reviews" | "quota" | "events" | "dashboard";
 export type PermissionMode = "ask" | "plan" | "accept-edits" | "workspace-write";
@@ -18,7 +20,7 @@ export interface CliContext {
 
 export type CliEffect =
   | { type: "assign"; sessionId: number; ticketId: string; modelId: string; improveBrief: boolean; reasoning: ReasoningMode }
-  | { type: "review"; reviewId: string; decision: ReviewDecision }
+  | { type: "review"; reviewId: string; decision: ReviewDecision; options?: CacheRevisionOptions }
   | { type: "compact"; sessionId: number }
   | { type: "purchase"; upgradeId: string }
   | { type: "mitigate"; action: IncidentMitigation }
@@ -122,6 +124,7 @@ function providerHelp(state: GameState, context: CliContext) {
     "  agents run <KEY>          assign work from Terminal",
     "  agents list|compact       inspect or compact orchestration slots",
     "  tickets list|read <KEY>    inspect the authored backlog",
+    "  reviews revise PERF-204 --remedy restore|bypass [--workflow ledger|probes]",
   ];
   const specific = isAnthill
     ? [
@@ -162,6 +165,7 @@ function agentHelp(state: GameState, context: CliContext) {
     "Tell me what you need in ordinary language. You do not need a ticket key or command syntax.",
     next ? `Try: “Could you take the next ticket?” or “What is ${next.key} about?”` : "Ask about pending reviews or the current work.",
     "Ask what changed or whether a review is safe before you approve it.",
+    "For a cache review, ask to restore invalidation, bypass the cache for now, or use a contract ledger or isolated probes.",
     "Use /status, /model, /permissions, or /new for session controls.",
     "Switch to Terminal for exact backlog, review, incident, and multiplexer tools.",
   ].join("\n");
@@ -207,7 +211,7 @@ function listTickets(state: GameState, context: CliContext) {
     const progress = ticketProgressLabel(state, ticket.id).toUpperCase();
     const estimate = projectedTicketRisk(state, ticket.id, context.permissionMode === "plan", context.reasoning, context.modelId);
     const risk = `${Math.round(ticket.baseRisk * 100)}%/${estimate.min}-${estimate.max}%${ticket.riskFlag === "none" ? "" : " !"}`;
-    return `${pad(ticket.key, 10)} ${pad(progress, 12)} ${pad(risk, 14)} ${ticket.title}`;
+    return `${pad(ticket.key, 10)} ${pad(progress, 12)} ${pad(risk, 14)} ${ticket.title}${ticket.optional ? " [optional]" : ""}`;
   });
   return [header, ...rows, "", `Risk is ticket baseline / estimate for the selected model and ${context.reasoning} reasoning with current repo, session, and upgrades, including expected work context decay. Future parallel work or repo changes can alter the result. Plan mode lowers the estimate; ! marks a known review finding.`].join("\n");
 }
@@ -230,6 +234,7 @@ function readTicket(state: GameState, reference?: string, context?: CliContext) 
       `${ticket.key} · ${ticket.title}`,
       `state       ${ticketProgressLabel(state, ticket.id)}`,
       `type        ${ticket.kind}`,
+      ...(ticket.optional ? ["release     optional follow-up; not required to finish the release"] : []),
       `brief       ${ticket.brief}`,
       `depends     ${dependencies}${incidentDependency}`,
       `files       ${ticket.files.join(", ")}`,
@@ -261,7 +266,8 @@ function listAgents(state: GameState) {
     ...state.sessions.map((session) => {
       const locked = session.id >= state.unlockedSessions;
       const ticket = session.ticketId ? ticketById.get(session.ticketId) : undefined;
-      return `${pad(session.id + 1, 10)} ${pad(locked ? "locked" : session.status, 18)} ${pad(session.modelId ?? "-", 14)} ${pad(locked ? "-" : `${Math.round(session.context)}%`, 10)} ${ticket ? `${ticket.key} ${Math.round(session.progress * 100)}%` : "-"}`;
+      const work = session.status === "supporting" ? `isolated probes for session ${(session.supportForSessionId ?? 0) + 1} · ${Math.round((state.sessions[session.supportForSessionId ?? -1]?.progress ?? 0) * 100)}%` : ticket ? `${ticket.key} ${Math.round(session.progress * 100)}%` : "-";
+      return `${pad(session.id + 1, 10)} ${pad(locked ? "locked" : session.status, 18)} ${pad(session.modelId ?? "-", 14)} ${pad(locked ? "-" : `${Math.round(session.context)}%`, 10)} ${work}`;
     }),
   ].join("\n");
 }
@@ -287,6 +293,19 @@ function readReview(state: GameState, reference?: string) {
   const resolution = ticket.riskFlag !== "none" && (session.reviewRound > 0 || (session.briefImproved && review.risk < 0.2)) ? ticket.evidence.resolution : undefined;
   const warning = resolution?.signal ?? ticket.evidence.signal;
   const tests = resolution?.tests ?? ticket.evidence.tests;
+  const cacheEvidence = getCacheReviewEvidence(state, review);
+  const cacheQuote = getCacheRevisionQuote(state, review.id);
+  const habit = CACHE_PROVIDER_HABITS[modelById.get(session.modelId ?? "")?.providerId as keyof typeof CACHE_PROVIDER_HABITS];
+  const cacheChoices = cacheQuote ? [
+    `scope choices restore invalidation: ${CACHE_EVIDENCE.ledger.scope}`,
+    `              bypass cache: ${CACHE_EVIDENCE.bypass.scope}`,
+    `approach      ${habit?.introduction ?? "Choose a write-boundary ledger or isolated probes."}`,
+    `workflows     ledger: ${CACHE_DECISIONS.ledger.seconds}s work, ${CACHE_DECISIONS.ledger.setupQuota} upfront provider quota, one slot, +${CACHE_DECISIONS.ledger.contextGain} context`,
+    `              probes: ${CACHE_DECISIONS.probes.seconds}s work, ${CACHE_DECISIONS.probes.setupQuota} upfront quota, one extra supporting slot at ${CACHE_DECISIONS.helperQuotaMultiplier * 100}% model quota rate, +${CACHE_DECISIONS.probes.contextGain} context`,
+    `default       ${cacheQuote.workflow ?? cacheQuote.remedy} · ${cacheQuote.seconds}s work · ${cacheQuote.setupQuota} upfront quota${cacheQuote.helperNeeded ? ` · helper ${cacheQuote.helperSessionId === null ? "unavailable" : `session ${cacheQuote.helperSessionId + 1}`}` : " · no helper slot"}${cacheQuote.fallbackReason ? ` · ${cacheQuote.fallbackReason}` : ""}`,
+    "choose        reviews revise PERF-204 --remedy restore --workflow ledger|probes",
+    "              reviews revise PERF-204 --remedy bypass",
+  ] : [];
   const recommendation = unresolvedFinding
     ? review.risk >= 0.6
       ? "BLOCKED: high aggregate risk; revise or escalate before approving"
@@ -308,12 +327,13 @@ function readReview(state: GameState, reference?: string) {
       `REVIEW ${ticket.key} · review risk score ${Math.round(review.risk * 100)}/100`,
       `gate        ${unresolvedFinding ? "unresolved finding" : "passed"}`,
       `risk source ${reviewRiskFactors(state, review)}`,
-      `change      ${resolution?.summary ?? (session.reviewRound > 0 ? `Revised: ${ticket.evidence.summary}` : ticket.evidence.summary)}`,
-      `tests       ${tests}`,
-      `warning     ${warning}`,
+      `change      ${cacheEvidence?.summary ?? resolution?.summary ?? (session.reviewRound > 0 ? `Revised: ${ticket.evidence.summary}` : ticket.evidence.summary)}`,
+      `tests       ${cacheEvidence?.tests ?? tests}`,
+      `warning     ${cacheEvidence?.signal ?? warning}`,
       ...history,
-      `scope       ${ticket.files.length} files · ${ticket.files.join(", ")}`,
+      `scope       ${cacheEvidence?.scope ?? `${ticket.files.length} files · ${ticket.files.join(", ")}`}`,
       `guidance    ${recommendation}`,
+      ...cacheChoices,
       "",
       `approve     reviews approve ${ticket.key}    ship now; ${unresolvedFinding ? "known defect escapes" : "gate passed"}`,
       `revise      reviews revise ${ticket.key}     resolve finding; another agent pass`,
@@ -397,6 +417,7 @@ function runTicket(state: GameState, context: CliContext, reference?: string, to
     ? state.sessions[sessionOption - 1]
     : state.sessions.find((candidate) => candidate.id < state.unlockedSessions && candidate.status === "idle");
   if (!session) return error("no idle orchestration slot; ship work to unlock parallel execution");
+  if (session.id >= state.unlockedSessions || session.status !== "idle") return error(session.status === "supporting" ? "that session is supporting isolated probes; wait for the owner to finish" : "that orchestration slot is locked or occupied");
   const requestedModel = option(tokens, "model") ?? context.modelId;
   const models = providerModels(state, context.providerId);
   const model = requestedModel
@@ -409,9 +430,67 @@ function runTicket(state: GameState, context: CliContext, reference?: string, to
   const provider = providerById.get(context.providerId);
   const eta = Math.max(1, Math.ceil(ticket.duration / model.speed));
   return {
-    messages: [output(`${provider?.shortName ?? "CLI"} · ${ticket.key} → session ${session.id + 1} / ${model.name}${improveBrief ? " / plan first" : ""}${reasoning !== "medium" ? ` / ${reasoning} reasoning` : ""} · review ~${eta}s`, "muted")],
+    messages: [output(`${provider?.shortName ?? "CLI"} · ${ticket.key} → session ${session.id + 1} / ${model.name}${improveBrief ? " / plan first (5 upfront quota)" : ""}${reasoning !== "medium" ? ` / ${reasoning} reasoning${reasoning === "high" ? " (4 extra upfront quota)" : " (+7 review risk)"}` : ""} · review ~${eta}s${state.sessions.some((candidate) => candidate.status === "working" || candidate.status === "quota-paused") && !state.purchasedUpgradeIds.includes("worktree-isolation") ? " · overlapping work shares the branch; contention adds review risk" : ""}`, "muted")],
     effect: { type: "assign", sessionId: session.id, ticketId: ticket.id, modelId: model.id, improveBrief, reasoning },
   } satisfies CliResult;
+}
+
+function reviseReview(state: GameState, reviewId: string, options?: CacheRevisionOptions): CliResult {
+  const review = state.reviews.find((candidate) => candidate.id === reviewId);
+  if (!review) return error("no pending review for that ticket");
+  const ticket = ticketById.get(review.ticketId)!;
+  if (options && ticket.id !== "cache-summary") return error("cache remedy and workflow choices apply only to PERF-204");
+  if (options?.remedy === "bypass" && options.workflow) return error("bypass has no restoration workflow; omit --workflow");
+  const quote = getCacheRevisionQuote(state, review.id, options);
+  if (quote?.helperNeeded && quote.helperSessionId === null) return error("isolated probes need a free unlocked supporting slot; use ledger or free a slot");
+  const providerId = modelById.get(state.sessions[review.sessionId]?.modelId ?? "")?.providerId ?? "";
+  if (quote && (state.providerQuota[providerId] ?? 0) < quote.setupQuota) return error(`ledger needs ${quote.setupQuota} provider quota upfront; use probes or wait for quota`);
+  const habit = CACHE_PROVIDER_HABITS[providerId as keyof typeof CACHE_PROVIDER_HABITS];
+  const details = quote ? ` · ${quote.remedy}${quote.workflow ? ` / ${quote.workflow}` : ""} · ${quote.seconds}s work · ${quote.setupQuota} upfront quota${quote.helperNeeded ? ` · supporting session ${quote.helperSessionId! + 1} at ${CACHE_DECISIONS.helperQuotaMultiplier * 100}% model quota rate` : " · no helper slot"}${quote.remedy === "bypass" ? ` · dashboard speed deferred; ${quote.rewardTrust}-trust reward, optional ${CACHE_DECISIONS.followup.key} follow-up` : " · dashboard speed retained"}${quote.fallbackReason ? ` · ${quote.fallbackReason}` : ""}${habit ? `\n${habit[quote.workflow ?? quote.remedy]}` : ""}` : "";
+  return {
+    messages: [output(`review.revise · ${ticket.key} · revision runs in session ${review.sessionId + 1}; use agents list to track it${details}`, "muted")],
+    effect: { type: "review", reviewId, decision: "revise", ...(options ? { options } : {}) },
+  };
+}
+
+function revisionOptions(tokens: string[]): { options?: CacheRevisionOptions; error?: string } {
+  if (!tokens.length) return {};
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (/^--(?:remedy|workflow)=/.test(token)) {
+      if (!token.split("=")[1]) return { error: "remedy and workflow flags need a value" };
+    } else if (token === "--remedy" || token === "--workflow") {
+      if (!tokens[index + 1] || tokens[index + 1].startsWith("--")) return { error: `${token} needs a value` };
+      index += 1;
+    } else return { error: "usage: reviews revise PERF-204 --remedy restore|bypass [--workflow ledger|probes]" };
+  }
+  if (tokens.filter((token) => /^--remedy(?:=|$)/.test(token)).length > 1 || tokens.filter((token) => /^--workflow(?:=|$)/.test(token)).length > 1) return { error: "choose each remedy or workflow only once" };
+  const remedy = option(tokens, "remedy") ?? "restore";
+  const workflow = option(tokens, "workflow");
+  if (remedy !== "restore" && remedy !== "bypass") return { error: "remedy must be restore or bypass" };
+  if (workflow !== undefined && workflow !== "ledger" && workflow !== "probes") return { error: "workflow must be ledger or probes" };
+  if (remedy === "bypass" && workflow) return { error: "bypass has no restoration workflow; omit --workflow" };
+  return { options: { remedy, ...(workflow ? { workflow } : {}) } };
+}
+
+function naturalCacheChoice(raw: string): { options: CacheRevisionOptions; ambiguous: boolean } {
+  // Alternatives explicitly rejected by the player are context, not instructions.
+  const chosen = raw.split(/\b(?:rather\s+than|instead\s+of|but\s+not|without|never|avoid|no)\b|[,;:]?\s*\bnot\b/i)[0];
+  const bypass = /\b(?:bypass|remove)\b/i.test(chosen);
+  const restore = /\brestore\b/i.test(chosen);
+  const probes = /\bprobes\b/i.test(chosen);
+  const ledger = /\bledger\b/i.test(chosen);
+  const rejected = raw.slice(chosen.length);
+  const rejectsProbes = /\bprobes\b/i.test(rejected);
+  const rejectsLedger = /\bledger\b/i.test(rejected);
+  const rejectsBypass = /\b(?:bypass|remove)\b/i.test(rejected);
+  const rejectsRestore = /\brestore\b/i.test(rejected);
+  const workflow = probes ? "probes" : ledger ? "ledger" : rejectsProbes ? "ledger" : rejectsLedger ? "probes" : undefined;
+  return {
+    options: { remedy: bypass ? "bypass" : "restore", ...(!bypass && workflow ? { workflow } : {}) },
+    ambiguous: (bypass && restore) || (probes && ledger) || (probes && rejectsProbes) || (ledger && rejectsLedger)
+      || (rejectsProbes && rejectsLedger) || (bypass && rejectsBypass) || (!bypass && (restore || Boolean(workflow)) && rejectsRestore),
+  };
 }
 
 function naturalLanguagePrompt(raw: string, state: GameState, context: CliContext): CliResult {
@@ -433,12 +512,34 @@ function naturalLanguagePrompt(raw: string, state: GameState, context: CliContex
   if (negatedWork.test(raw) || /\b(?:hold\s+off|refrain|delay|postpone|wait|not\s+ready|cannot|can['’]t)\b/i.test(raw)) {
     return { messages: [output(`No work started${reference ? ` for ${reference}` : ""}. Tell me when you're ready to pick it up.`, "muted")] };
   }
-  const reviewQuestion = /\b(reviews?|inspect|diff|changes?|tests?|warning|approve|merge|ship|safe)\b/i.test(raw);
-  const reviewDecision = !inquiry && /^\s*(?:(?:please|let'?s)\s+)?(?:approve|merge|accept|ship|revise|request changes|escalate)\b/i.exec(raw)?.[0].toLowerCase();
+  const cacheIntent = /\b(?:invalidation|cache|ledger|probes)\b/i.test(raw);
+  if (cacheIntent && /^\s*(?:please\s+)?(?:do\s+not|don['’]t|never|avoid)\b|\b(?:do\s+not|don['’]t)\s+want\b/i.test(raw)) return { messages: [output("No cache revision started. Ask when you want to choose a remedy or workflow.", "muted")] };
+  const cacheReview = explicit ? state.reviews.find((review) => review.ticketId === findTicket(explicit)?.id) : state.reviews.find((review) => review.ticketId === "cache-summary");
+  const cacheAction = /^\s*(?:(?:please|let'?s)\s+|(?:can|could|would)\s+you\s+(?:please\s+)?|(?:I|we)\s+(?:want|need|would\s+like)\s+you\s+to\s+)?(?:restore\b|bypass\b|remove\s+(?:the\s+)?cache\b|use\s+(?:(?:the|a|an)\s+)?(?:isolated\s+probes|probes|contract\s+ledger|ledger)\b)/i.test(raw);
+  const cacheInquiry = inquiry || /\b(?:only|just)\s+(?:ask(?:ing)?|explain(?:ing)?)\b|\bexplain\b/i.test(raw)
+    || (raw.includes("?") && !/^\s*(?:can|could|would)\s+you\b/i.test(raw));
+  if (cacheReview && cacheInquiry && (cacheIntent || /\b(?:what would|what will|what does|how much).*\b(?:take|cost)\b/i.test(raw))) return readReview(state, ticketById.get(cacheReview.ticketId)?.key);
+  if (cacheIntent && cacheInquiry) return ticket ? readTicket(state, ticket.key, context) : { messages: [output("No cache revision started. I can explain restore versus bypass or ledger versus isolated probes when PERF-204 reaches review.", "muted")] };
+  const cacheChoice = naturalCacheChoice(raw);
+  if (cacheIntent && cacheChoice.ambiguous && !cacheInquiry) return { messages: [output("No cache revision started. Choose restore or bypass, and choose ledger or probes when restoring; I can explain either option.", "muted")] };
+  if (cacheIntent && cacheAction && !cacheInquiry) {
+    if (!cacheReview) return error("no pending cache review; inspect PERF-204 before choosing a remedy");
+    const result = reviseReview(state, cacheReview.id, cacheChoice.options);
+    return { ...result, messages: result.messages.map((message) => ({ ...message, text: message.text.replace("revision runs", "Revision runs") })) };
+  }
+  const reviewQuestion = /\b(reviews?|inspect|diff|changes?|changed|tests?|warning|approve|merge|ship|safe)\b/i.test(raw);
+  const reviewDecision = !(cacheIntent ? cacheInquiry : inquiry) && /^\s*(?:(?:please|let'?s)\s+)?(?:approve|merge|accept|ship|revise|request changes|escalate)\b/i.exec(raw)?.[0].toLowerCase();
   if (reviewDecision && (pending || reference)) {
     if (pending) {
       const decision: ReviewDecision = /revise|request changes/.test(reviewDecision) ? "revise" : /escalate/.test(reviewDecision) ? "escalate" : "approve";
-      return { messages: [output(`${decision === "approve" ? "Approving" : decision === "revise" ? "Requesting changes for" : "Escalating"} ${pendingKey}.${decision === "revise" ? ` Revision runs in session ${pending.sessionId + 1}; use agents list to track it.` : ""}`, "muted")], effect: { type: "review", reviewId: pending.id, decision } };
+      if (decision === "revise") {
+        const options: CacheRevisionOptions | undefined = pending.ticketId === "cache-summary" && cacheIntent && /\b(?:restore|bypass|remove|ledger|probes)\b/i.test(raw)
+          ? cacheChoice.options
+          : undefined;
+        const result = reviseReview(state, pending.id, options);
+        return { ...result, messages: result.messages.map((message) => ({ ...message, text: message.text.replace("revision runs", "Revision runs") })) };
+      }
+      return { messages: [output(`${decision === "approve" ? "Approving" : "Escalating"} ${pendingKey}.`, "muted")], effect: { type: "review", reviewId: pending.id, decision } };
     }
     if (!/ship/.test(reviewDecision)) return { messages: [output(`There is no pending review for ${reference}.`, "muted")] };
   }
@@ -540,13 +641,13 @@ export function evaluateCommand(raw: string, state: GameState, suppliedContext: 
   if (command === "permissions") {
     if (!subcommand) return { messages: [output(`permission mode: ${context.permissionMode}\nchoices: ask, plan, accept-edits, workspace-write\nplan automatically clarifies the next ticket for 5 quota`)] };
     if (!["ask", "plan", "accept-edits", "workspace-write"].includes(subcommand)) return error("permission mode must be ask, plan, accept-edits, or workspace-write");
-    return { messages: [output(`permission mode → ${subcommand}`, "success")], effect: { type: "permissions", mode: subcommand as PermissionMode } };
+    return { messages: [output(`permission mode → ${subcommand}${subcommand === "plan" ? "; the next assignment spends 5 upfront provider quota to clarify acceptance criteria" : ""}`, "success")], effect: { type: "permissions", mode: subcommand as PermissionMode } };
   }
   if (command === "reasoning") {
     if (context.providerId !== "openmind") return error("reasoning controls are available in OpenMind Forge");
     if (!subcommand) return { messages: [output(`reasoning effort: ${context.reasoning ?? "medium"}\nlow: +7 review risk · medium: baseline · high: -9 review risk and -4 setup quota`)] };
     if (!["low", "medium", "high"].includes(subcommand)) return error("reasoning must be low, medium, or high");
-    return { messages: [output(`reasoning effort → ${subcommand}`, "success")], effect: { type: "reasoning", mode: subcommand as ReasoningMode } };
+    return { messages: [output(`reasoning effort → ${subcommand}${subcommand === "high" ? "; the next assignment spends 4 extra upfront quota for −9 review risk" : subcommand === "low" ? "; the next assignment adds +7 review risk" : "; baseline review risk, no extra setup quota"}`, "success")], effect: { type: "reasoning", mode: subcommand as ReasoningMode } };
   }
   if (command === "init") {
     return { messages: [output("Repository guidance loaded\n\n  • use fictional providers and models\n  • preserve deterministic game rules\n  • run checks before shipping\n  • keep changes scoped to the active ticket", "success")] };
@@ -574,6 +675,7 @@ export function evaluateCommand(raw: string, state: GameState, suppliedContext: 
     if (subcommand === "compact") {
       const sessionId = Number(tokens[2]) - 1;
       if (!Number.isInteger(sessionId)) return error("usage: agents compact <SESSION>");
+      if (state.sessions[sessionId]?.status === "supporting") return error("a supporting probe session cannot be compacted; inspect its owning session");
       return { messages: [output(`compacting session ${sessionId + 1}…`, "muted")], effect: { type: "compact", sessionId } };
     }
     if (subcommand === "run") return runTicket(state, context, tokens[2], tokens, raw);
@@ -584,6 +686,7 @@ export function evaluateCommand(raw: string, state: GameState, suppliedContext: 
     const explicit = Number(tokens[1]);
     const session = Number.isInteger(explicit) && explicit > 0 ? state.sessions[explicit - 1] : activeProviderSession(state, context.providerId, context.sessionId);
     if (!session) return error("this provider has no active session to compact");
+    if (session.status === "supporting") return error("a supporting probe session cannot be compacted; inspect its owning session");
     const provider = modelById.get(session.modelId ?? "")?.providerId;
     if (provider !== context.providerId) return error("that session belongs to the other provider CLI");
     return { messages: [output("Compacting conversation…", "muted")], effect: { type: "compact", sessionId: session.id } };
@@ -601,6 +704,12 @@ export function evaluateCommand(raw: string, state: GameState, suppliedContext: 
       const ticket = findTicket(tokens[2]);
       const review = ticket ? state.reviews.find((candidate) => candidate.ticketId === ticket.id) : undefined;
       if (!ticket || !review) return error("no pending review for that ticket");
+      if (subcommand === "revise") {
+        const parsed = revisionOptions(tokens.slice(3));
+        if (parsed.error) return error(parsed.error);
+        return reviseReview(state, review.id, parsed.options);
+      }
+      if (tokens.length > 3) return error("remedy and workflow flags apply only to reviews revise PERF-204");
       return {
         messages: [output(`review.${subcommand} · ${ticket.key}${subcommand === "revise" ? ` · revision runs in session ${review.sessionId + 1}; use agents list to track it` : ""}`, "muted")],
         effect: { type: "review", reviewId: review.id, decision: subcommand as ReviewDecision },
@@ -698,6 +807,9 @@ export function commandSuggestions(providerId: string, state?: GameState) {
   const reviewTicket = review ? ticketById.get(review.ticketId) : undefined;
   const session = visibleProviderSession(state, providerId);
   const nextTicket = availableTickets(state)[0];
+  if (reviewTicket?.id === "cache-summary") return isReviewBlocked(state, review!)
+    ? [`reviews read ${reviewTicket.key}`, "reviews revise PERF-204 --remedy restore", "reviews revise PERF-204 --remedy bypass", "agents list", "/usage"]
+    : [`reviews read ${reviewTicket.key}`, "reviews approve PERF-204", "agents list", "/usage"];
   if (reviewTicket) return ["/status", `reviews read ${reviewTicket.key}`, "reviews list", "events 5", "/usage"];
   if (session) return ["/status", "/context", ...(session.status === "awaiting-review" ? ["reviews list"] : ["/compact"]), "events 5", "/usage"];
   if (nextTicket) return ["/status", "tickets list", `tickets read ${nextTicket.key}`, `agents run ${nextTicket.key}`, "/model"];
@@ -710,6 +822,9 @@ export function agentSuggestions(providerId: string, state: GameState) {
   }
   const review = state.reviews.find((candidate) => modelById.get(state.sessions[candidate.sessionId]?.modelId ?? "")?.providerId === providerId) ?? state.reviews[0];
   const reviewKey = review ? ticketById.get(review.ticketId)?.key : undefined;
+  if (review?.ticketId === "cache-summary") return isReviewBlocked(state, review)
+    ? ["What changed in PERF-204?", "Restore invalidation for PERF-204", "Bypass the cache for now", "What would this take?"]
+    : ["What changed in PERF-204?", "Approve PERF-204", "What would this take?", "How much quota is left?"];
   if (reviewKey) return [`What changed in ${reviewKey}?`, `Is ${reviewKey} safe to approve?`, `Please revise ${reviewKey}`, "How much quota is left?"];
   const next = availableTickets(state)[0];
   if (next) return ["What should I work on next?", "Please take the next ticket", `Tell me about ${next.key}`, "How much quota is left?"];

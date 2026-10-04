@@ -1,5 +1,11 @@
-export type SessionStatus = "idle" | "working" | "quota-paused" | "awaiting-review";
+export type SessionStatus = "idle" | "working" | "quota-paused" | "awaiting-review" | "supporting";
 export type ReviewDecision = "approve" | "revise" | "escalate";
+export type CacheRemedy = "restore" | "bypass";
+export type CacheWorkflow = "ledger" | "probes";
+export interface CacheRevisionOptions {
+  remedy: CacheRemedy;
+  workflow?: CacheWorkflow;
+}
 export type IncidentResponse = "none" | "active" | "scaled" | "rate-limited" | "rolled-back" | "resolved";
 export type IncidentMitigation = "scale" | "rate-limit" | "rollback";
 
@@ -14,6 +20,11 @@ export interface SessionState {
   reviewRound: number;
   workedInParallel: boolean;
   reasoning: "low" | "medium" | "high";
+  cacheRemedy: CacheRemedy | null;
+  cacheWorkflow: CacheWorkflow | null;
+  /** Actual work-seconds for a targeted pass; null uses the ticket/model duration. */
+  workDuration: number | null;
+  supportForSessionId: number | null;
 }
 
 export interface ReviewState {
@@ -71,6 +82,7 @@ export interface GameState {
   reviews: ReviewState[];
   incidentResponse: IncidentResponse;
   incidentMitigation: "none" | IncidentMitigation;
+  cacheOutcome: "none" | "restored" | "bypassed";
   flags: {
     cacheShortcut: boolean;
     privacyDefaultedOn: boolean;

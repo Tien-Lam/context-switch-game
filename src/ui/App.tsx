@@ -25,6 +25,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { content, modelById, providerById, ticketById } from "../content";
 import { BALANCE } from "../game/balance";
+import { getCacheReviewEvidence, getCacheRevisionQuote } from "../game/decisionDepth";
 import { availableModels, availableTickets, isReviewBlocked, reviewRiskFactors, ticketProgressLabel, visibleTickets } from "../game/selectors";
 import type { GameState, SessionState } from "../game/types";
 import { useGameStore } from "../app/store";
@@ -116,6 +117,7 @@ function SessionCard({ session, game }: { session: SessionState; game: GameState
     const ticket = ticketById.get(session.ticketId ?? "");
     const model = modelById.get(session.modelId ?? "");
     const provider = providerById.get(model?.providerId ?? "");
+    const displayedProgress = session.status === "supporting" ? game.sessions[session.supportForSessionId ?? -1]?.progress ?? 0 : session.progress;
     return (
       <article className={`session-card status-${session.status}`}>
         <div className="session-title">
@@ -124,13 +126,15 @@ function SessionCard({ session, game }: { session: SessionState; game: GameState
           <span className="pill">{session.status.replace("-", " ")}</span>
         </div>
         <div className="session-model"><span className="provider-dot" style={{ background: provider?.color }} />{provider?.name} / <strong>{model?.name}</strong></div>
-        <h3>{ticket?.key} · {ticket?.title}</h3>
-        <Meter value={session.progress * 100} color={provider?.color} label="Implementation progress" />
+        <h3>{session.status === "supporting" ? `Isolated probes for session ${(session.supportForSessionId ?? 0) + 1}` : `${ticket?.key} · ${ticket?.title}`}</h3>
+        <Meter value={displayedProgress * 100} color={provider?.color} label="Implementation progress" />
         <div className="session-metrics">
-          <span>{Math.round(session.progress * 100)}% complete</span>
+          <span>{Math.round(displayedProgress * 100)}% complete</span>
           <span>{Math.round(session.context)}% context</span>
         </div>
-        {session.status === "awaiting-review" ? (
+        {session.status === "supporting" ? (
+          <p className="hint">This slot supports PERF-204 and releases automatically when its checks finish.</p>
+        ) : session.status === "awaiting-review" ? (
           <p className="hint"><GitPullRequest /> The implementation is waiting in the review queue.</p>
         ) : (
           <button className="ghost-button" onClick={() => compact(session.id)} disabled={(game.providerQuota[model?.providerId ?? ""] ?? 0) < BALANCE.compactQuotaCost}>Compact context · {BALANCE.compactQuotaCost} quota</button>
@@ -203,14 +207,17 @@ function ReviewQueue({ game }: { game: GameState }) {
             const unresolvedFinding = isReviewBlocked(game, item);
             const riskLabel = unresolvedFinding ? "Blocked" : "Gate passed";
             const resolution = ticket.riskFlag !== "none" && (session.reviewRound > 0 || (session.briefImproved && item.risk < 0.2)) ? ticket.evidence.resolution : undefined;
+            const cacheEvidence = getCacheReviewEvidence(game, item);
+            const cacheQuote = getCacheRevisionQuote(game, item.id, { remedy: "restore" });
             return (
               <article className="review-card" key={item.id}>
                 <div className="review-top"><div><span className="eyebrow">{ticket.key}</span><h3>{ticket.title}</h3></div><span className={`risk ${unresolvedFinding ? "risk-high-risk" : "risk-low-risk"}`}>{riskLabel} · {Math.round(item.risk * 100)}/100</span></div>
-                <p>{resolution?.summary ?? (session.reviewRound > 0 ? `Revised: ${ticket.evidence.summary}` : ticket.evidence.summary)}</p>
-                <ul className="evidence-list"><li><Check />{resolution?.tests ?? ticket.evidence.tests}</li><li><AlertTriangle />{resolution?.signal ?? ticket.evidence.signal}</li><li><FileCode2 />{ticket.files.join(" · ")}</li><li><CircleGauge />Risk: {reviewRiskFactors(game, item)}</li></ul>
+                <p>{cacheEvidence?.summary ?? resolution?.summary ?? (session.reviewRound > 0 ? `Revised: ${ticket.evidence.summary}` : ticket.evidence.summary)}</p>
+                <ul className="evidence-list"><li><Check />{cacheEvidence?.tests ?? resolution?.tests ?? ticket.evidence.tests}</li><li><AlertTriangle />{cacheEvidence?.signal ?? resolution?.signal ?? ticket.evidence.signal}</li><li><FileCode2 />{cacheEvidence?.scope ?? ticket.files.join(" · ")}</li><li><CircleGauge />Risk: {reviewRiskFactors(game, item)}</li></ul>
                 <div className="review-actions">
                   <button onClick={() => review(item.id, "approve")}><Check />Approve <span>{unresolvedFinding ? item.risk >= 0.6 ? "high-risk change" : "known defect" : "ship now"}</span></button>
-                  <button onClick={() => review(item.id, "revise")}><RefreshCcw />Revise <span>resolve finding</span></button>
+                  <button onClick={() => review(item.id, "revise", cacheQuote ? { remedy: "restore" } : undefined)}><RefreshCcw />{cacheQuote ? "Restore invalidation" : "Revise"} <span>{cacheQuote ? `${cacheQuote.workflow} · ${cacheQuote.seconds}s · ${cacheQuote.setupQuota} setup quota${cacheQuote.helperNeeded ? " · helper slot" : ""}` : "resolve finding"}</span></button>
+                  {cacheQuote && <button onClick={() => review(item.id, "revise", { remedy: "bypass" })}><RefreshCcw />Bypass cache <span>fresh but slow · reduced reward · optional follow-up</span></button>}
                   <button disabled={game.trust < BALANCE.escalationTrustCost} onClick={() => review(item.id, "escalate")}><Sparkles />Escalate <span>{game.trust >= BALANCE.escalationTrustCost ? `+4 health · −${BALANCE.escalationTrustCost} trust` : `need ${BALANCE.escalationTrustCost} trust`}</span></button>
                 </div>
               </article>
@@ -455,7 +462,10 @@ function MonitorPane({ mode, game }: { mode: PaneMode; game: GameState }) {
   return (
     <aside className="mux-monitor full-window-tool" aria-label={`${mode} monitor`}>
       <div className="mux-pane-title"><span>watch.{mode}</span><span>LIVE</span></div>
-      {mode === "agents" && <div className="watch-list">{game.sessions.slice(0, game.unlockedSessions).map((session) => <div className="watch-row" key={session.id}><span>#{session.id + 1}</span><strong>{session.status}</strong><small>{session.ticketId ? `${ticketById.get(session.ticketId)?.key} · ${Math.round(session.progress * 100)}%` : "idle"}</small><Meter value={session.progress * 100} label={`Session ${session.id + 1}`} /></div>)}</div>}
+      {mode === "agents" && <div className="watch-list">{game.sessions.slice(0, game.unlockedSessions).map((session) => {
+        const progress = session.status === "supporting" ? game.sessions[session.supportForSessionId ?? -1]?.progress ?? 0 : session.progress;
+        return <div className="watch-row" key={session.id}><span>#{session.id + 1}</span><strong>{session.status}</strong><small>{session.status === "supporting" ? `PERF-204 probes · supports #${(session.supportForSessionId ?? 0) + 1} · ${Math.round(progress * 100)}%` : session.ticketId ? `${ticketById.get(session.ticketId)?.key} · ${Math.round(progress * 100)}%` : "idle"}</small><Meter value={progress * 100} label={`Session ${session.id + 1}`} /></div>;
+      })}</div>}
       {mode === "reviews" && <div className="watch-list">{game.reviews.length ? game.reviews.map((review) => { const ticket = ticketById.get(review.ticketId); const blocked = isReviewBlocked(game, review); return <div className="watch-row" key={review.id}><span>{ticket?.key}</span><strong>{blocked ? "blocked finding" : "gate passed"}</strong><small>session {review.sessionId + 1} · score {Math.round(review.risk * 100)}/100</small></div>; }) : <p className="terminal-empty">review queue empty</p>}</div>}
       {mode === "quota" && <div className="watch-list">{content.providers.map((provider) => <div className="watch-row" key={provider.id}><span>{provider.shortName}</span><strong>{Math.round(game.providerQuota[provider.id] ?? 0)} remaining</strong><Meter value={game.providerQuota[provider.id] ?? 0} max={provider.maxQuota} color={provider.color} label={provider.name} /></div>)}</div>}
       {mode === "events" && <div className="watch-events">{game.events.slice(0, 12).map((event) => <article key={event.id} className={`watch-event event-${event.tone}`}><time>{clock(event.at)}</time><div><strong>{event.title}</strong><p>{event.message}</p></div></article>)}</div>}
@@ -627,7 +637,7 @@ export function App() {
         ? { ...tab, boundSessionId: effect.sessionId }
         : tab.boundSessionId === effect.sessionId ? { ...tab, boundSessionId: undefined } : tab));
     }
-    if (effect.type === "review") failure = store.review(effect.reviewId, effect.decision);
+    if (effect.type === "review") failure = store.review(effect.reviewId, effect.decision, effect.options);
     if (effect.type === "compact") failure = store.compact(effect.sessionId);
     if (effect.type === "purchase") failure = store.purchase(effect.upgradeId);
     if (effect.type === "mitigate") failure = store.mitigate(effect.action);

@@ -4,7 +4,7 @@ import { content, modelById, ticketById, upgradeById } from "../content";
 import { computeEnding } from "../game/engine";
 import type { GameState } from "../game/types";
 
-export const SAVE_VERSION = 8;
+export const SAVE_VERSION = 9;
 const SAVE_ID = "active";
 const EMERGENCY_KEY = "context-switch-emergency-save";
 
@@ -27,7 +27,7 @@ const finiteNumber = z.number().finite();
 const boundedPercent = finiteNumber.min(0).max(100);
 const SessionSchema = z.object({
   id: z.number().int().nonnegative(),
-  status: z.enum(["idle", "working", "quota-paused", "awaiting-review"]),
+  status: z.enum(["idle", "working", "quota-paused", "awaiting-review", "supporting"]),
   ticketId: z.string().nullable(),
   modelId: z.string().nullable(),
   progress: finiteNumber.min(0).max(1),
@@ -36,6 +36,10 @@ const SessionSchema = z.object({
   reviewRound: z.number().int().nonnegative(),
   workedInParallel: z.boolean().default(false),
   reasoning: z.enum(["low", "medium", "high"]),
+  cacheRemedy: z.enum(["restore", "bypass"]).nullable(),
+  cacheWorkflow: z.enum(["ledger", "probes"]).nullable(),
+  workDuration: finiteNumber.positive().nullable(),
+  supportForSessionId: z.number().int().nonnegative().nullable(),
 });
 const ReviewSchema = z.object({
   id: z.string().min(1),
@@ -86,6 +90,7 @@ const GameStateSchema = z.object({
   reviews: z.array(ReviewSchema),
   incidentResponse: z.enum(["none", "active", "scaled", "rate-limited", "rolled-back", "resolved"]),
   incidentMitigation: z.enum(["none", "scale", "rate-limit", "rollback"]),
+  cacheOutcome: z.enum(["none", "restored", "bypassed"]),
   flags: z.object({
     cacheShortcut: z.boolean(),
     privacyDefaultedOn: z.boolean(),
@@ -145,9 +150,27 @@ function validateReferences(game: GameState) {
     if (session.status === "idle" && (session.ticketId !== null || session.modelId !== null)) {
       throw new Error("Invalid idle session.");
     }
-    if (session.status !== "idle" && (session.ticketId === null || session.modelId === null)) {
+    if (session.status !== "idle" && session.id >= game.unlockedSessions) throw new Error("Locked session is occupied.");
+    if (session.status === "supporting") {
+      const owner = game.sessions[session.supportForSessionId ?? -1];
+      if (session.ticketId !== null || session.modelId === null || !owner || owner.id === session.id
+        || !["working", "quota-paused"].includes(owner.status) || owner.ticketId !== "cache-summary"
+        || owner.cacheRemedy !== "restore" || owner.cacheWorkflow !== "probes"
+        || owner.modelId !== session.modelId || session.cacheRemedy !== null
+        || session.cacheWorkflow !== null || session.workDuration !== null) throw new Error("Invalid supporting session.");
+    } else if (session.supportForSessionId !== null) throw new Error("Invalid support owner.");
+    if (session.status !== "idle" && session.status !== "supporting" && (session.ticketId === null || session.modelId === null)) {
       throw new Error("Invalid active session.");
     }
+    if (session.cacheRemedy !== null) {
+      if (session.ticketId !== "cache-summary" || session.reviewRound < 1 || session.workDuration === null
+        || (session.cacheRemedy === "bypass" ? session.cacheWorkflow !== null : session.cacheWorkflow === null)) {
+        throw new Error("Invalid cache revision.");
+      }
+    } else if (session.cacheWorkflow !== null || session.workDuration !== null) throw new Error("Invalid targeted work.");
+    const helpers = game.sessions.filter((helper) => helper.status === "supporting" && helper.supportForSessionId === session.id);
+    const needsHelper = session.cacheWorkflow === "probes" && ["working", "quota-paused"].includes(session.status);
+    if (helpers.length !== (needsHelper ? 1 : 0)) throw new Error("Invalid supporting occupancy.");
     if (session.ticketId !== null) {
       if (activeTicketIds.has(session.ticketId) || game.completedTicketIds.includes(session.ticketId)) {
         throw new Error("Invalid active ticket occupancy.");
@@ -309,6 +332,23 @@ function migrateEnvelope(value: unknown): SaveEnvelope {
       };
     }
     version = 8;
+  }
+  if (version === 8) {
+    if (game && typeof game === "object") {
+      const previous = game as Record<string, unknown>;
+      const flags = previous.flags && typeof previous.flags === "object" ? previous.flags as Record<string, unknown> : {};
+      const completed = Array.isArray(previous.completedTicketIds) ? previous.completedTicketIds : [];
+      const cacheRepaired = completed.some((id) => typeof id === "string" && ticketById.get(id)?.incidentFor === "cache-shortcut");
+      game = {
+        ...previous,
+        cacheOutcome: previous.cacheOutcome ?? (completed.includes("cache-summary") && (!flags.cacheShortcut || cacheRepaired) ? "restored" : "none"),
+        sessions: Array.isArray(previous.sessions) ? previous.sessions.map((value) => value && typeof value === "object" ? {
+          cacheRemedy: null, cacheWorkflow: null, workDuration: null, supportForSessionId: null,
+          ...value,
+        } : value) : previous.sessions,
+      };
+    }
+    version = 9;
   }
   if (version !== SAVE_VERSION || typeof candidate.savedAt !== "number" || !Number.isFinite(candidate.savedAt)) {
     throw new Error("Invalid save envelope.");

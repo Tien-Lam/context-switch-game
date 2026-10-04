@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { BALANCE } from "../game/balance";
 import { advanceGame, buyUpgrade, compactSession, GameRuleError, mitigateIncident, reviewTicket, startTicket } from "../game/engine";
 import { createInitialState } from "../game/initialState";
-import type { GameState, IncidentMitigation, ReviewDecision } from "../game/types";
+import type { CacheRevisionOptions, GameState, IncidentMitigation, ReviewDecision } from "../game/types";
 import { clearSave, loadGame, parseSave, saveGame, serialiseSave } from "./persistence";
 
 type Speed = 1 | 4 | 12;
@@ -20,7 +20,7 @@ interface GameStore {
   persist: () => Promise<void>;
   setSpeed: (speed: Speed) => void;
   assign: (sessionId: number, ticketId: string, modelId: string, improveBrief: boolean, reasoning?: "low" | "medium" | "high") => string | null;
-  review: (reviewId: string, decision: ReviewDecision) => string | null;
+  review: (reviewId: string, decision: ReviewDecision, options?: CacheRevisionOptions) => string | null;
   compact: (sessionId: number) => string | null;
   purchase: (upgradeId: string) => string | null;
   mitigate: (action: IncidentMitigation) => string | null;
@@ -101,7 +101,7 @@ export const useGameStore = create<GameStore>((set, get) => {
     },
     setSpeed: (speed) => set({ speed }),
     assign: (sessionId, ticketId, modelId, improveBrief, reasoning) => commit((state) => startTicket(state, sessionId, ticketId, modelId, improveBrief, reasoning)),
-    review: (reviewId, decision) => commit((state) => reviewTicket(state, reviewId, decision)),
+    review: (reviewId, decision, options) => commit((state) => reviewTicket(state, reviewId, decision, options)),
     compact: (sessionId) => commit((state) => compactSession(state, sessionId)),
     purchase: (upgradeId) => commit((state) => buyUpgrade(state, upgradeId)),
     mitigate: (action) => commit((state) => mitigateIncident(state, action)),
