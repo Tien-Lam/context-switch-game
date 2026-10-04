@@ -13,6 +13,7 @@ export interface CliContext {
   permissionMode?: PermissionMode;
   reasoning?: ReasoningMode;
   sessionId?: number | null;
+  cwd?: string;
 }
 
 export type CliEffect =
@@ -117,6 +118,7 @@ function providerHelp(state: GameState, context: CliContext) {
     "                             plan spends 5 quota to clarify the next assignment",
     "  /review [KEY]              inspect the review queue or a diff",
     "  /new                       start a fresh conversation",
+    "  /exit                      return to shell; work continues in background",
     "  agents run <KEY>          assign work from Terminal",
     "  agents list|compact       inspect or compact orchestration slots",
     "  tickets list|read <KEY>    inspect the authored backlog",
@@ -175,7 +177,7 @@ function status(state: GameState, context: CliContext) {
       "SESSION CONFIGURATION",
       `  model              ${model?.name ?? "unselected"}`,
       `  reasoning          ${context.reasoning ?? "medium"}`,
-      "  directory          ~/delivery",
+      `  directory          ${context.cwd ?? "~/delivery"}`,
       `  permissions        ${context.permissionMode ?? "workspace-write"}`,
       `  quota              ${Math.round(state.providerQuota[context.providerId] ?? 0)}/${provider?.maxQuota ?? 0}`,
       `  task               ${ticket ? `${ticket.key} · ${Math.round((active?.progress ?? 0) * 100)}%` : "idle"}`,
@@ -189,7 +191,7 @@ function status(state: GameState, context: CliContext) {
     "ANTHILL SESSION STATUS",
     `  model              ${model?.name ?? "unselected"}`,
     `  permission mode    ${context.permissionMode ?? "ask"}`,
-    "  project            ~/delivery",
+    `  project            ${context.cwd ?? "~/delivery"}`,
     `  plan usage         ${Math.round(state.providerQuota[context.providerId] ?? 0)}/${provider?.maxQuota ?? 0} remaining`,
     `  context            ${active ? `${Math.round(active.context)}% left` : "fresh"}`,
     `  current task       ${ticket ? `${ticket.key} · ${Math.round((active?.progress ?? 0) * 100)}%` : "none"}`,
@@ -207,7 +209,7 @@ function listTickets(state: GameState, context: CliContext) {
     const risk = `${Math.round(ticket.baseRisk * 100)}%/${estimate.min}-${estimate.max}%${ticket.riskFlag === "none" ? "" : " !"}`;
     return `${pad(ticket.key, 10)} ${pad(progress, 12)} ${pad(risk, 14)} ${ticket.title}`;
   });
-  return [header, ...rows, "", `Risk is ticket baseline / estimate for the selected model and ${context.reasoning} reasoning with current repo, session, and upgrades. Plan mode lowers the estimate; ! marks a known review finding.`].join("\n");
+  return [header, ...rows, "", `Risk is ticket baseline / estimate for the selected model and ${context.reasoning} reasoning with current repo, session, and upgrades, including expected work context decay. Future parallel work or repo changes can alter the result. Plan mode lowers the estimate; ! marks a known review finding.`].join("\n");
 }
 
 function readTicket(state: GameState, reference?: string, context?: CliContext) {
@@ -436,7 +438,7 @@ function naturalLanguagePrompt(raw: string, state: GameState, context: CliContex
   if (reviewDecision && (pending || reference)) {
     if (pending) {
       const decision: ReviewDecision = /revise|request changes/.test(reviewDecision) ? "revise" : /escalate/.test(reviewDecision) ? "escalate" : "approve";
-      return { messages: [output(`${decision === "approve" ? "Approving" : decision === "revise" ? "Requesting changes for" : "Escalating"} ${pendingKey}.`, "muted")], effect: { type: "review", reviewId: pending.id, decision } };
+      return { messages: [output(`${decision === "approve" ? "Approving" : decision === "revise" ? "Requesting changes for" : "Escalating"} ${pendingKey}.${decision === "revise" ? ` Revision runs in session ${pending.sessionId + 1}; use agents list to track it.` : ""}`, "muted")], effect: { type: "review", reviewId: pending.id, decision } };
     }
     if (!/ship/.test(reviewDecision)) return { messages: [output(`There is no pending review for ${reference}.`, "muted")] };
   }
@@ -469,6 +471,10 @@ function naturalLanguagePrompt(raw: string, state: GameState, context: CliContex
   if (/\b(quota|usage|limit|reset)\b/i.test(raw)) return { messages: [output(quota(state, context))] };
   if (/\b(models?|reasoning)\b/i.test(raw)) return { messages: [output(listModels(state, context))] };
   if (/\b(status|progress|working|doing)\b/i.test(raw)) return { messages: [output(status(state, context))] };
+  if (/^\s*(?:pwd|ls|cd|cat|less|more|grep|rg|find|tree|head|tail|wc|mkdir|touch|cp|mv|rm|echo|printf)\b/i.test(raw)
+    || /\b(?:read|show|open|inspect)\b.*\b[^\s]+\.(?:txt|md|json|ts|tsx|js|css)\b/i.test(raw)) {
+    return { messages: [output("Virtual-file tools live in Terminal: switch surfaces to read or edit sandbox files. Here I can explain tickets, take work, and inspect review evidence in your own words. Try ‘What should I work on next?’ or ‘Is this review safe?’", "muted")] };
+  }
   const next = ready.find((item) => !item.incidentFor && item.kind !== "finale") ?? ready[0];
   return { messages: [output(`${providerById.get(context.providerId)?.name ?? "Agent"}: ${reference ? `I can look into ${reference} or take it on when you ask. ` : "Tell me what you want to work on in your own words. "}${next ? `The next ready ticket is ${next.key} (${next.title}).` : "There is no ready ticket right now; check the review queue."}`, "muted")] };
 }
@@ -596,7 +602,7 @@ export function evaluateCommand(raw: string, state: GameState, suppliedContext: 
       const review = ticket ? state.reviews.find((candidate) => candidate.ticketId === ticket.id) : undefined;
       if (!ticket || !review) return error("no pending review for that ticket");
       return {
-        messages: [output(`review.${subcommand} · ${ticket.key}`, "muted")],
+        messages: [output(`review.${subcommand} · ${ticket.key}${subcommand === "revise" ? ` · revision runs in session ${review.sessionId + 1}; use agents list to track it` : ""}`, "muted")],
         effect: { type: "review", reviewId: review.id, decision: subcommand as ReviewDecision },
       };
     }

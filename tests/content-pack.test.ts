@@ -20,6 +20,27 @@ function finish(state: ReturnType<typeof createInitialState>, ticketId: string, 
 }
 
 describe("second chapter content pack", () => {
+  it("does not blame repaired UI fallback for an unresolved API rollout warning", () => {
+    let state = readyFor(["investor-demo", "green-build"]);
+    state = finish(state, "account-api", "approve");
+    state = finish(state, "account-panel", "revise");
+    state = advanceGame(state, 20);
+    const review = state.reviews.find((candidate) => candidate.ticketId === "account-panel")!;
+    state = reviewTicket(state, review.id, "approve");
+    const event = state.events.find((candidate) => candidate.title === "Cross-branch contract failed");
+    expect(event?.message).toContain("unresolved account compatibility warning");
+    expect(event?.message).not.toContain("old server/new panel combination failed");
+  });
+  it("does not blame a repaired API adapter when the panel warning remains open", () => {
+    let state = readyFor(["investor-demo", "green-build"]);
+    state = finish(state, "account-api", "revise");
+    state = advanceGame(state, 20);
+    state = reviewTicket(state, state.reviews.find((review) => review.ticketId === "account-api")!.id, "approve");
+    state = finish(state, "account-panel", "approve");
+    const event = state.events.find((candidate) => candidate.title === "Cross-branch contract failed");
+    expect(event?.message).toContain("unresolved account compatibility warning");
+    expect(event?.message).not.toContain("unresolved API-420");
+  });
   it("turns the investor demo into a checkpoint and exposes the green build", () => {
     const state = readyFor(["investor-demo"]);
     expect(state.ending).toBeNull();

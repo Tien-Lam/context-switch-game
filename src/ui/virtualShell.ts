@@ -18,6 +18,20 @@ export interface ShellResult {
   error?: string;
   cwd: string;
   fs: VirtualFileSystem;
+  previousCwd?: string;
+  exitCode?: number;
+}
+
+export interface ShellOptions {
+  previousCwd?: string;
+  /** Only invoked for allowlisted inspection commands; never apply game effects here. */
+  evaluateGameCommand?: (raw: string) => { text?: string; error?: string };
+}
+
+export interface ShellCompletion {
+  input: string;
+  cursor: number;
+  matches: string[];
 }
 
 const builtins = new Set([
@@ -27,12 +41,25 @@ const builtins = new Set([
 const PIPE = "\u0000|";
 const REDIRECT = "\u0000>";
 const APPEND = "\u0000>>";
+const INPUT = "\u0000<";
+const AND = "\u0000&&";
+const SEQUENCE = "\u0000;";
+const operators = new Set([PIPE, REDIRECT, APPEND, INPUT, AND, SEQUENCE]);
+const mutatingBuiltins = new Set(["cd", "mkdir", "rmdir", "touch", "cp", "mv", "rm"]);
+const gameCommands = ["tickets", "agents", "reviews", "upgrades", "events", "mux", "status", "trace", "models", "quota", "usage", "cost", "review", "diff"];
+
+export function isReadOnlyShellGameCommand(command: string, args: readonly string[]): boolean {
+  const subcommand = args[0]?.toLowerCase();
+  if (["status", "trace", "models", "quota", "usage", "cost", "events", "mux", "review", "diff"].includes(command)) return true;
+  if (["tickets", "agents", "reviews", "upgrades"].includes(command) && (!subcommand || subcommand === "list")) return true;
+  return command === "tickets" && ["read", "show"].includes(subcommand ?? "") || command === "reviews" && ["read", "inspect"].includes(subcommand ?? "");
+}
 
 const directory = (): Entry => ({ kind: "dir" });
 const file = (content: string): Entry => ({ kind: "file", content });
 
-export function resolveShellPath(cwd: string, input = "."): string {
-  const expanded = input === "~" ? SHELL_HOME : input.startsWith("~/") ? `${SHELL_HOME}/${input.slice(2)}` : input;
+export function resolveShellPath(cwd: string, input = ".", expandTilde = true): string {
+  const expanded = expandTilde && input === "~" ? SHELL_HOME : expandTilde && input.startsWith("~/") ? `${SHELL_HOME}/${input.slice(2)}` : input;
   const parts = (expanded.startsWith("/") ? expanded : `${cwd}/${expanded}`).split("/");
   const stack: string[] = [];
   for (const part of parts) {
@@ -86,42 +113,116 @@ export function syncVirtualFileSystem(previous: VirtualFileSystem, game: GameSta
   return fs;
 }
 
-function tokenize(raw: string): { tokens: string[]; error?: string } {
-  const tokens: string[] = [];
-  let buffer = "";
+interface WordPart { text: string; expand: boolean; glob: boolean }
+interface ShellWord { parts: WordPart[]; tilde: boolean }
+type ShellToken = ShellWord | string;
+
+function tokenize(raw: string): { tokens: ShellToken[]; error?: string } {
+  const tokens: ShellToken[] = [];
+  let parts: WordPart[] = [];
   let quote: "'" | '"' | null = null;
   let started = false;
-  const flush = () => { if (started) tokens.push(buffer); buffer = ""; started = false; };
+  let tilde = false;
+  const add = (text: string, expand: boolean, glob: boolean) => {
+    const previous = parts.at(-1);
+    if (previous?.expand === expand && previous.glob === glob) previous.text += text;
+    else parts.push({ text, expand, glob });
+    started = true;
+  };
+  const flush = () => { if (started) tokens.push({ parts, tilde }); parts = []; started = false; tilde = false; };
   for (let index = 0; index < raw.length; index += 1) {
     const character = raw[index];
     if (character === "\\" && quote !== "'") {
       if (index + 1 >= raw.length) return { tokens: [], error: "unfinished escape" };
-      buffer += raw[index + 1];
+      add(raw[index + 1], false, false);
       index += 1;
       started = true;
       continue;
     }
     if (quote) {
       if (character === quote) quote = null;
-      else buffer += character;
+      else {
+        if (quote === '"' && (character === "`" || character === "$" && raw[index + 1] === "(")) return { tokens: [], error: "command substitution is not supported" };
+        add(character, quote === '"', false);
+      }
       started = true;
       continue;
     }
     if (character === "'" || character === '"') { quote = character; started = true; continue; }
     if (/\s/.test(character)) { flush(); continue; }
-    if (character === "|" || character === ">") {
+    if (character === "`" || character === "$" && raw[index + 1] === "(") return { tokens: [], error: "command substitution is not supported" };
+    if (character === "|" || character === ">" || character === "<" || character === "&" || character === ";") {
       flush();
+      if (character === "|" && raw[index + 1] === "|") return { tokens: [], error: "operator || is not supported" };
+      if (character === "<" && raw[index + 1] === "<") return { tokens: [], error: "here-documents are not supported" };
+      if (character === "&") {
+        if (raw[index + 1] !== "&") return { tokens: [], error: "background execution (&) is not supported" };
+        tokens.push(AND); index += 1; continue;
+      }
       if (character === ">" && raw[index + 1] === ">") { tokens.push(APPEND); index += 1; }
-      else tokens.push(character === "|" ? PIPE : REDIRECT);
+      else tokens.push(character === "|" ? PIPE : character === "<" ? INPUT : character === ";" ? SEQUENCE : REDIRECT);
       continue;
     }
-    if (character === ";" || character === "&" || character === "<") return { tokens: [], error: `operator ${character} is not supported in the simulated shell` };
-    buffer += character;
-    started = true;
+    if (!started && character === "~") tilde = true;
+    add(character, true, true);
   }
   if (quote) return { tokens: [], error: "unclosed quote" };
   flush();
   return { tokens };
+}
+
+const escapePattern = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+function expandWord(word: ShellWord, cwd: string, fs: VirtualFileSystem, previousCwd?: string): { values: string[]; error?: string } {
+  const variables: Record<string, string> = { HOME: SHELL_HOME, PWD: cwd, OLDPWD: previousCwd ?? "" };
+  let text = "";
+  let pattern = "";
+  let hasGlob = false;
+  for (const part of word.parts) {
+    let value = part.text;
+    if (part.expand) {
+      let failure: string | undefined;
+      value = value.replace(/\$\{([^}]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (_, braced: string | undefined, plain: string | undefined) => {
+        const name = braced ?? plain!;
+        if (!Object.hasOwn(variables, name)) failure = `variable ${name} is not supported; use HOME, PWD, or OLDPWD`;
+        return Object.hasOwn(variables, name) ? variables[name] : "";
+      });
+      if (failure) return { values: [], error: failure };
+      if (value.includes("${")) return { values: [], error: "unfinished variable expansion" };
+    }
+    text += value;
+    for (const character of value) {
+      if (part.glob && (character === "*" || character === "?")) { pattern += character === "*" ? "\u0001" : "\u0002"; hasGlob = true; }
+      else pattern += escapePattern(character);
+    }
+  }
+  if (word.tilde && (text === "~" || text.startsWith("~/"))) {
+    text = `${SHELL_HOME}${text.slice(1)}`;
+    pattern = `${escapePattern(SHELL_HOME)}${pattern.slice(1)}`;
+  }
+  if (!hasGlob) return { values: [text] };
+  // Wildcards match a path segment, never slash or a leading dot. Unmatched patterns stay literal.
+  const absolute = text.startsWith("/");
+  const patternSegments = absolute ? [] as string[] : cwd.split("/").filter(Boolean).map(escapePattern);
+  const literalSegments = text.split("/");
+  pattern.split("/").forEach((segment, index) => {
+    if (!literalSegments[index] || literalSegments[index] === ".") return;
+    if (literalSegments[index] === "..") patternSegments.pop();
+    else patternSegments.push(segment);
+  });
+  const matcher = new RegExp(`^/${patternSegments.join("/").replace(/\u0001/g, "[^/]*").replace(/\u0002/g, "[^/]")}/?$`);
+  const matches = Object.keys(fs.entries).filter((path) => {
+    if (!matcher.test(path)) return false;
+    return path.split("/").filter(Boolean).every((segment, index) => !segment.startsWith(".") || patternSegments[index]?.startsWith("\\."));
+  }).sort().map((path) => {
+    if (absolute) return path;
+    const base = cwd.split("/").filter(Boolean);
+    const target = path.split("/").filter(Boolean);
+    let common = 0;
+    while (common < base.length && common < target.length && base[common] === target[common]) common += 1;
+    return [...base.slice(common).map(() => ".."), ...target.slice(common)].join("/") || ".";
+  });
+  return { values: matches.length ? matches : [text] };
 }
 
 function children(fs: VirtualFileSystem, path: string): string[] {
@@ -165,7 +266,7 @@ function copyPath(fs: VirtualFileSystem, source: string, destination: string, re
   return undefined;
 }
 
-const shellHelp = [
+export const shellHelp = [
   "SIMULATED TERMINAL · ~/delivery",
   "  anthill | forge          launch a fictional coding agent",
   "  pwd | ls [-la] | cd      navigate the virtual workspace",
@@ -173,12 +274,23 @@ const shellHelp = [
   "  mkdir [-p] | touch | cp [-r] | mv | rm [-r] | rmdir",
   "  echo | printf            print text; > and >> write virtual files",
   "  cat FILE | grep text     pipe output between shell commands",
+  "  tickets list | grep APP  pipe read-only game inspection output",
+  "  COMMAND && NEXT; NEXT    chain on success, or continue after errors",
+  "  cat < FILE               read a virtual file as standard input",
+  "  cd -                     switch to the previous virtual directory",
+  "  $HOME $PWD $OLDPWD        expand these variables; single quotes are literal",
+  "  ~ ~/PATH * ?             unquoted home and segment wildcards; no hidden files",
+  "  Tab                      complete commands and virtual paths",
   "  git status|log|diff      inspect simulated game work",
   "  history | whoami | hostname | date | env | which",
   "  tickets | agents | reviews | upgrades | events | mux  game tools",
+  "  /help                   full agent/game workflow command reference",
   "  clear                   clear this terminal's output",
   "",
   "This is a sandbox, not your computer or a real repository. File edits do not complete tickets.",
+  "Unmatched globs stay literal. Variables do not split into words. Quotes and escapes suppress globs.",
+  "Unsupported: ||, background &, substitutions, other variables, assignments, scripts, real processes, network.",
+  "Pipelines allow inspection and text filters only; game mutations and filesystem mutations cannot be piped.",
 ].join("\n");
 
 function gitOutput(args: string[], game: GameState): string | { error: string } {
@@ -202,9 +314,9 @@ function gitOutput(args: string[], game: GameState): string | { error: string } 
   return { error: `git ${subcommand} is not simulated; use git status|log|diff|branch` };
 }
 
-function runBuiltin(command: string, args: string[], stdin: string | undefined, cwd: string, fs: VirtualFileSystem, game: GameState, history: string[]): { text?: string; error?: string; cwd?: string } {
+function runBuiltin(command: string, args: string[], stdin: string | undefined, cwd: string, fs: VirtualFileSystem, game: GameState, history: string[]): { text?: string; error?: string; cwd?: string; exitCode?: number } {
   const paths = args.filter((arg) => !arg.startsWith("-"));
-  const pathAt = (input?: string) => resolveShellPath(cwd, input);
+  const pathAt = (input?: string) => resolveShellPath(cwd, input, false);
   if (command === "help" || command === "man") return { text: shellHelp };
   if (command === "pwd") return { text: cwd };
   if (command === "whoami") return { text: "dev" };
@@ -215,7 +327,7 @@ function runBuiltin(command: string, args: string[], stdin: string | undefined, 
   if (command === "history") return { text: history.map((line, index) => `${String(index + 1).padStart(3)}  ${line}`).join("\n") };
   if (command === "git") { const result = gitOutput(args, game); return typeof result === "string" ? { text: result } : result; }
   if (command === "cd") {
-    const next = pathAt(args[0] ?? "~");
+    const next = pathAt(args[0] ?? SHELL_HOME);
     return fs.entries[next]?.kind === "dir" ? { cwd: next } : { error: `not a directory: ${displayShellPath(next)}` };
   }
   if (command === "ls") {
@@ -332,7 +444,7 @@ function runBuiltin(command: string, args: string[], stdin: string | undefined, 
     try { matcher = new RegExp(flags.some((flag) => flag.includes("F")) ? pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : pattern, insensitive ? "i" : ""); }
     catch { return { error: `invalid search pattern: ${pattern}` }; }
     const targetPaths = values.slice(1).map(pathAt);
-    if (!targetPaths.length && recursive) targetPaths.push(cwd);
+    if (!targetPaths.length && recursive && stdin === undefined) targetPaths.push(cwd);
     const sources = targetPaths.length ? targetPaths.flatMap((path) => fs.entries[path]?.kind === "dir" && recursive ? Object.keys(fs.entries).filter((candidate) => candidate.startsWith(`${path}/`) && fs.entries[candidate].kind === "file") : [path]) : [];
     if (sources.some((path) => readFile(fs, path) === undefined)) return { error: "grep: file not found or is a directory" };
     const documents = sources.length ? sources.map((path) => ({ path, content: readFile(fs, path)! })) : [{ path: "", content: stdin ?? "" }];
@@ -340,7 +452,7 @@ function runBuiltin(command: string, args: string[], stdin: string | undefined, 
     for (const document of documents) document.content.split("\n").forEach((line, index) => {
       if (matcher.test(line)) matches.push(`${sources.length > 1 || recursive ? `${displayShellPath(document.path)}:` : ""}${numbered ? `${index + 1}:` : ""}${line}`);
     });
-    return { text: matches.slice(0, 200).join("\n") };
+    return { text: matches.slice(0, 200).join("\n"), exitCode: matches.length ? 0 : 1 };
   }
   if (["head", "tail", "wc", "sort", "uniq"].includes(command)) {
     const countIndex = args.indexOf("-n");
@@ -351,7 +463,7 @@ function runBuiltin(command: string, args: string[], stdin: string | undefined, 
     if (command === "head" || command === "tail") {
       const count = Number(args.includes("-n") ? args[args.indexOf("-n") + 1] : args.find((arg) => /^-\d+$/.test(arg))?.slice(1) ?? 10);
       if (!Number.isInteger(count) || count < 0) return { error: `invalid line count: ${count}` };
-      return { text: (command === "head" ? lines.slice(0, count) : lines.slice(-count)).join("\n") };
+      return { text: (command === "head" ? lines.slice(0, count) : count ? lines.slice(-count) : []).join("\n") };
     }
     if (command === "sort") return { text: lines.sort().join("\n") };
     if (command === "uniq") return { text: lines.filter((line, index) => index === 0 || line !== lines[index - 1]).join("\n") };
@@ -363,42 +475,171 @@ function runBuiltin(command: string, args: string[], stdin: string | undefined, 
   return { error: `command not found: ${command}` };
 }
 
-export function evaluateVirtualShell(raw: string, game: GameState, cwd: string, previousFs: VirtualFileSystem, history: string[]): ShellResult {
-  const parsed = tokenize(raw);
-  const fs = syncVirtualFileSystem(previousFs, game);
-  if (parsed.error) return { handled: true, error: parsed.error, cwd, fs };
-  const tokens = parsed.tokens;
-  const first = tokens[0]?.toLowerCase();
-  if (!first || !builtins.has(first)) return { handled: false, cwd, fs };
-  const stages: string[][] = [[]];
-  let redirect: { path: string; append: boolean } | undefined;
+interface ShellStage { words: ShellWord[]; input?: ShellWord; output?: { word: ShellWord; append: boolean } }
+interface ShellPipeline { stages: ShellStage[]; after?: string }
+
+function parsePipelines(tokens: ShellToken[]): { pipelines: ShellPipeline[]; error?: string } {
+  const pipelines: ShellPipeline[] = [{ stages: [{ words: [] }] }];
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
-    if (token === PIPE) { if (!stages.at(-1)?.length) return { handled: true, error: "empty pipeline stage", cwd, fs }; stages.push([]); continue; }
-    if (token === REDIRECT || token === APPEND) {
-      if (redirect || index !== tokens.length - 2) return { handled: true, error: "redirection must be the final operation", cwd, fs };
-      redirect = { path: tokens[index + 1], append: token === APPEND };
-      break;
+    const pipeline = pipelines.at(-1)!;
+    const stage = pipeline.stages.at(-1)!;
+    if (typeof token !== "string") { stage.words.push(token); continue; }
+    if (token === INPUT || token === REDIRECT || token === APPEND) {
+      const word = tokens[++index];
+      if (!word || typeof word === "string") return { pipelines: [], error: "redirection requires a path" };
+      if (token === INPUT) {
+        if (stage.input) return { pipelines: [], error: "duplicate input redirection" };
+        stage.input = word;
+      } else {
+        if (stage.output) return { pipelines: [], error: "duplicate output redirection" };
+        stage.output = { word, append: token === APPEND };
+      }
+      continue;
     }
-    stages.at(-1)!.push(token);
+    if (!stage.words.length) return { pipelines: [], error: token === PIPE ? "empty pipeline stage" : "empty chained command" };
+    if (token === PIPE) {
+      if (stage.output) return { pipelines: [], error: "output redirection must follow the final pipeline stage" };
+      pipeline.stages.push({ words: [] });
+    } else {
+      pipeline.after = token;
+      pipelines.push({ stages: [{ words: [] }] });
+    }
   }
-  if (stages.some((stage) => !stage.length)) return { handled: true, error: "empty pipeline stage", cwd, fs };
-  let text = "";
-  let nextCwd = cwd;
-  for (const [index, stage] of stages.entries()) {
-    const command = stage[0].toLowerCase();
-    if (!builtins.has(command)) return { handled: true, error: `command not found: ${command}`, cwd, fs };
-    if (index > 0 && ["cd", "mkdir", "rmdir", "touch", "cp", "mv", "rm"].includes(command)) return { handled: true, error: `${command} cannot read pipeline input`, cwd, fs };
-    const result = runBuiltin(command, stage.slice(1), index > 0 ? text : undefined, nextCwd, fs, game, history);
-    if (result.error) return { handled: true, error: result.error, cwd, fs: previousFs };
-    text = result.text ?? "";
-    nextCwd = result.cwd ?? nextCwd;
+  if (!pipelines.at(-1)!.stages.at(-1)!.words.length) {
+    const finalStage = pipelines.at(-1)!.stages.at(-1)!;
+    if (pipelines.length > 1 && pipelines.at(-2)!.after === SEQUENCE && !finalStage.input && !finalStage.output) pipelines.pop();
+    else return { pipelines: [], error: "empty pipeline or chained command" };
   }
-  if (redirect) {
-    const destination = resolveShellPath(nextCwd, redirect.path);
-    const failure = writeFile(fs, destination, `${redirect.append ? readFile(fs, destination) ?? "" : ""}${text}`);
-    if (failure) return { handled: true, error: failure, cwd, fs: previousFs };
-    text = "";
+  return { pipelines };
+}
+
+export function evaluateVirtualShell(raw: string, game: GameState, cwd: string, previousFs: VirtualFileSystem, history: string[], options: ShellOptions = {}): ShellResult {
+  const parsed = tokenize(raw);
+  let fs = syncVirtualFileSystem(previousFs, game);
+  let previousCwd = options.previousCwd;
+  const resultBase = () => ({ handled: true, cwd, fs, previousCwd });
+  if (parsed.error) return { ...resultBase(), error: parsed.error };
+  if (!parsed.tokens.length) return { ...resultBase(), handled: false };
+  const compound = parsed.tokens.some((token) => typeof token === "string" && operators.has(token));
+  const firstWord = parsed.tokens[0];
+  const first = typeof firstWord !== "string" ? firstWord.parts.map((part) => part.text).join("").toLowerCase() : "";
+  if (!compound && !builtins.has(first)) return { ...resultBase(), handled: false };
+  const parsedPipelines = parsePipelines(parsed.tokens);
+  if (parsedPipelines.error) return { ...resultBase(), error: parsedPipelines.error };
+  let succeeded = true;
+  let exitCode = 0;
+  let previousConnector: string | undefined;
+  const outputs: string[] = [];
+  const failures: string[] = [];
+  for (const pipeline of parsedPipelines.pipelines) {
+    if (previousConnector === AND && !succeeded) { previousConnector = pipeline.after; continue; }
+    previousConnector = pipeline.after;
+    const draft = cloneFs(fs);
+    let draftCwd = cwd;
+    let draftPreviousCwd = previousCwd;
+    let text = "";
+    let failure: string | undefined;
+    // Validate every stage before invoking any game callback.
+    const stages: { command: string; args: string[]; stage: ShellStage }[] = [];
+    for (const stage of pipeline.stages) {
+      const words: string[] = [];
+      for (const word of stage.words) {
+        const expanded = expandWord(word, cwd, draft, previousCwd);
+        if (expanded.error) { failure = expanded.error; break; }
+        words.push(...expanded.values);
+      }
+      if (failure) break;
+      const command = words[0]?.toLowerCase() ?? "";
+      const args = words.slice(1);
+      if (pipeline.stages.length > 1 && mutatingBuiltins.has(command)) failure = `${command} cannot be used in a pipeline`;
+      else if (!builtins.has(command) && !isReadOnlyShellGameCommand(command, args)) failure = gameCommands.includes(command) ? `${command} mutations are not supported in shell pipelines or chains` : `command not found: ${command}`;
+      else if (!builtins.has(command) && !options.evaluateGameCommand) failure = `${command}: game inspection is unavailable in this shell`;
+      stages.push({ command, args, stage });
+      if (failure) break;
+    }
+    for (const [index, { command, args, stage }] of stages.entries()) {
+      if (failure) break;
+      let stdin = index > 0 ? text : undefined;
+      if (stage.input) {
+        const expanded = expandWord(stage.input, draftCwd, draft, draftPreviousCwd);
+        if (expanded.error || expanded.values.length !== 1) { failure = expanded.error ?? "ambiguous input redirection"; break; }
+        const path = resolveShellPath(draftCwd, expanded.values[0], false);
+        stdin = readFile(draft, path);
+        if (stdin === undefined) { failure = draft.entries[path]?.kind === "dir" ? `is a directory: ${displayShellPath(path)}` : `no such file: ${displayShellPath(path)}`; break; }
+      }
+      let output: { text?: string; error?: string; cwd?: string; exitCode?: number };
+      if (command === "cd" && args[0] === "-") {
+        output = draftPreviousCwd ? runBuiltin("cd", [draftPreviousCwd], stdin, draftCwd, draft, game, history) : { error: "OLDPWD is not set" };
+        if (output.cwd) output.text = output.cwd;
+      } else if (builtins.has(command)) output = runBuiltin(command, args, stdin, draftCwd, draft, game, history);
+      else {
+        try { output = options.evaluateGameCommand!([command, ...args].join(" ")); }
+        catch { output = { error: `${command}: game inspection failed` }; }
+      }
+      if (output.error) { failure = output.error; break; }
+      exitCode = output.exitCode ?? 0;
+      text = output.text ?? "";
+      if (output.cwd) { draftPreviousCwd = draftCwd; draftCwd = output.cwd; }
+      if (stage.output) {
+        const expanded = expandWord(stage.output.word, draftCwd, draft, draftPreviousCwd);
+        if (expanded.error || expanded.values.length !== 1) { failure = expanded.error ?? "ambiguous output redirection"; break; }
+        const path = resolveShellPath(draftCwd, expanded.values[0], false);
+        failure = writeFile(draft, path, `${stage.output.append ? readFile(draft, path) ?? "" : ""}${text}`);
+        if (failure) break;
+        text = "";
+      }
+    }
+    if (failure) exitCode = 1;
+    succeeded = !failure && exitCode === 0;
+    if (failure) failures.push(failure);
+    else { fs = draft; cwd = draftCwd; previousCwd = draftPreviousCwd; if (text) outputs.push(text); }
   }
-  return { handled: true, text: text.slice(0, 20_000), cwd: nextCwd, fs };
+  const text = outputs.reduce((combined, output) => `${combined}${combined && !combined.endsWith("\n") ? "\n" : ""}${output}`, "").slice(0, 20_000);
+  return { ...resultBase(), text, exitCode, ...(failures.length ? { error: failures.join("\n") } : {}) };
+}
+
+/** Complete the token at the cursor; ambiguous matches extend only their shared prefix. */
+export function completeShellInput(raw: string, cwd: string, fs: VirtualFileSystem, options: { cursor?: number; commands?: readonly string[]; previousCwd?: string } = {}): ShellCompletion {
+  const cursor = Math.max(0, Math.min(raw.length, options.cursor ?? raw.length));
+  const prefix = raw.slice(0, cursor);
+  let start = 0;
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+  let commandPosition = true;
+  let tokenIsCommand = true;
+  for (let index = 0; index < prefix.length; index += 1) {
+    const character = prefix[index];
+    if (escaped) { escaped = false; continue; }
+    if (character === "\\" && quote !== "'") { escaped = true; continue; }
+    if (quote) { if (character === quote) quote = null; continue; }
+    if (character === "'" || character === '"') { quote = character; continue; }
+    if (/\s/.test(character)) { if (index > start) commandPosition = false; start = index + 1; tokenIsCommand = commandPosition; }
+    else if ("|;&<>".includes(character)) { commandPosition = "|;&".includes(character); tokenIsCommand = commandPosition; start = index + 1; }
+  }
+  const token = prefix.slice(start);
+  const openingQuote = token.startsWith("'") ? "'" : token.startsWith('"') ? '"' : "";
+  const parsed = tokenize(`${token}${quote ?? ""}`);
+  if (parsed.error || parsed.tokens.length > 1 || typeof parsed.tokens[0] === "string") return { input: raw, cursor, matches: [] };
+  const word = parsed.tokens[0];
+  const expanded = word ? expandWord(word, cwd, { entries: {}, deletedSeeds: [] }, options.previousCwd) : { values: [""] };
+  if (expanded.error) return { input: raw, cursor, matches: [] };
+  const value = expanded.values[0];
+  let matches: string[];
+  if (tokenIsCommand && !value.includes("/")) matches = [...new Set([...builtins, ...gameCommands, "anthill", "forge", "clear", ...options.commands ?? []])].filter((command) => command.startsWith(value)).sort();
+  else {
+    const slash = value.lastIndexOf("/");
+    const directoryPart = slash < 0 ? "" : value.slice(0, slash + 1);
+    const filename = value.slice(slash + 1);
+    const path = resolveShellPath(cwd, directoryPart || ".", false);
+    matches = children(fs, path).filter((candidate) => baseName(candidate).startsWith(filename) && (!baseName(candidate).startsWith(".") || filename.startsWith(".")) && (!prefix.slice(0, start).trimEnd().endsWith("cd") || fs.entries[candidate].kind === "dir")).map((candidate) => `${directoryPart}${baseName(candidate)}${fs.entries[candidate].kind === "dir" ? "/" : ""}`);
+    if (word?.tilde && (token === "~" || token.startsWith("~/"))) matches = matches.map((match) => `~${match.slice(SHELL_HOME.length)}`);
+  }
+  if (!matches.length) return { input: raw, cursor, matches };
+  let shared = matches[0];
+  for (const match of matches.slice(1)) { while (!match.startsWith(shared)) shared = shared.slice(0, -1); }
+  if (shared.length <= token.replace(/^['"]/, "").length && matches.length > 1) return { input: raw, cursor, matches };
+  const replacement = openingQuote ? `${openingQuote}${shared}${matches.length === 1 && !shared.endsWith("/") ? openingQuote : ""}` : shared.replace(/[\s\\'"$`|&;<>*?]/g, "\\$&");
+  const completed = `${replacement}${matches.length === 1 && !shared.endsWith("/") && !/\s/.test(raw[cursor] ?? "") ? " " : ""}`;
+  return { input: `${raw.slice(0, start)}${completed}${raw.slice(cursor)}`, cursor: start + completed.length, matches };
 }

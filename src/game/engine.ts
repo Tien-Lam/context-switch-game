@@ -125,7 +125,7 @@ function unlockProgression(state: GameState) {
       providerId: "anthill",
       tone: "warning",
       title: "Anthill changed the team plan",
-      message: "A fictional provider policy update removed 14 Anthill quota. OpenMind's pool is independent; use its tab for the next ticket or wait for regeneration.",
+      message: "A fictional provider policy update removed 14 Anthill quota. OpenMind's pool is independent; use its tab for the next ticket while Anthill regenerates.",
     });
   }
   if (state.completedTicketIds.includes("investor-demo") && !state.completedTicketIds.includes("green-build")
@@ -217,7 +217,7 @@ function announceConsequences(state: GameState) {
       addEvent(state, {
         tone: "warning",
         title: "Cross-branch contract failed",
-        message: "Each agent's own tests passed, but an old server/new panel combination failed. FIX-420 must reconcile the branches before INT-422 can ship.",
+        message: "An unresolved account compatibility warning failed the rollout matrix. FIX-420 must reconcile the branches before INT-422 can ship.",
       });
     } else {
       addEvent(state, { tone: "good", title: "Cross-branch contract passed", message: "Both deployment orders work. INT-422 is ready to join the branches." });
@@ -434,7 +434,7 @@ export function advanceGame(source: GameState, elapsedSeconds: number) {
           session.progress = 1;
           session.status = "awaiting-review";
           state.reviews.push({
-            id: `${ticket.id}-${session.reviewRound}-${Math.round(state.gameTime)}`,
+            id: `${ticket.id}-${session.reviewRound}-${Math.round(state.gameTime + SIMULATION_EPSILON)}`,
             ticketId: ticket.id,
             sessionId: session.id,
             risk: calculateReviewRisk(state, session),
@@ -541,7 +541,7 @@ export function advanceGame(source: GameState, elapsedSeconds: number) {
         session.progress = 1;
         session.status = "awaiting-review";
         state.reviews.push({
-          id: `${ticket.id}-${session.reviewRound}-${Math.round(state.gameTime)}`,
+          id: `${ticket.id}-${session.reviewRound}-${Math.round(state.gameTime + SIMULATION_EPSILON)}`,
           ticketId: ticket.id,
           sessionId: session.id,
           risk: calculateReviewRisk(state, session),
@@ -617,6 +617,7 @@ export function compactSession(source: GameState, sessionId: number) {
 }
 
 export function buyUpgrade(source: GameState, upgradeId: string) {
+  if (source.ending) throw new GameRuleError("This run has ended.");
   const upgrade = upgradeById.get(upgradeId);
   if (!upgrade) throw new GameRuleError("Unknown upgrade.");
   if (source.purchasedUpgradeIds.includes(upgradeId)) throw new GameRuleError("Upgrade already purchased.");

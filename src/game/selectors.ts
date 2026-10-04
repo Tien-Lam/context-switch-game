@@ -1,4 +1,5 @@
 import { content, modelById, providerById, ticketById } from "../content";
+import { BALANCE } from "./balance";
 import type { GameState, ReviewState } from "./types";
 
 const clampRisk = (value: number) => Math.max(0.02, Math.min(0.92, value));
@@ -30,7 +31,6 @@ export function projectedTicketRisk(state: GameState, ticketId: string, planned 
   if (!choices.length) return { min: Math.round(ticket.baseRisk * 100), max: Math.round(ticket.baseRisk * 100) };
   const idle = state.sessions.find((session) => session.id < state.unlockedSessions && session.status === "idle");
   const context = idle?.context ?? 100;
-  const contextPenalty = Math.max(0, 80 - context) / 200;
   const active = state.sessions.some((session) => session.status === "working" || session.status === "quota-paused");
   const parallelPenalty = active && !state.purchasedUpgradeIds.includes("worktree-isolation") ? 0.09 : 0;
   const healthPenalty = Math.max(0, 70 - state.repoHealth) / 220;
@@ -39,10 +39,16 @@ export function projectedTicketRisk(state: GameState, ticketId: string, planned 
   const integrityBonus = state.purchasedUpgradeIds.includes("ci-integrity-guard") ? 0.05 : 0;
   const planBonus = planned ? 0.13 : 0;
   const reasoningModifier = reasoning === "high" ? -0.09 : reasoning === "low" ? 0.07 : 0;
-  const estimates = choices.map((model) => clampRisk(
-    ticket.baseRisk + model.riskModifier + reasoningModifier + contextPenalty + parallelPenalty + healthPenalty
-      - briefingBonus - testsBonus - integrityBonus - planBonus,
-  ));
+  const estimates = choices.map((model) => {
+    // Quota starvation changes elapsed time, not the amount of actual work/decay.
+    const decayMultiplier = state.purchasedUpgradeIds.includes("context-notes") ? 0.55 : 1;
+    const completionContext = Math.max(0, context - ticket.duration / model.speed * model.contextDecay * BALANCE.contextDecayPerWorkSecond * decayMultiplier);
+    const contextPenalty = Math.max(0, 80 - completionContext) / 200;
+    return clampRisk(
+      ticket.baseRisk + model.riskModifier + reasoningModifier + contextPenalty + parallelPenalty + healthPenalty
+        - briefingBonus - testsBonus - integrityBonus - planBonus,
+    );
+  });
   return { min: Math.round(Math.min(...estimates) * 100), max: Math.round(Math.max(...estimates) * 100) };
 }
 

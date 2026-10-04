@@ -11,6 +11,7 @@ const EMERGENCY_KEY = "context-switch-emergency-save";
 export interface SaveEnvelope {
   version: number;
   savedAt: number;
+  snapshotSequence?: number;
   game: GameState;
 }
 
@@ -20,6 +21,7 @@ interface SaveRecord extends SaveEnvelope {
 
 let database: (Dexie & { saves: EntityTable<SaveRecord, "id"> }) | null = null;
 let saveQueue: Promise<void> = Promise.resolve();
+let snapshotSequence = 0;
 
 const finiteNumber = z.number().finite();
 const boundedPercent = finiteNumber.min(0).max(100);
@@ -136,6 +138,7 @@ function validateReferences(game: GameState) {
   for (const provider of content.providers) {
     if (!Object.hasOwn(game.providerQuota, provider.id)) throw new Error("Missing provider quota.");
   }
+  const activeTicketIds = new Set<string>();
   for (const session of game.sessions) {
     if (session.ticketId !== null && !ticketById.has(session.ticketId)) throw new Error("Unknown active ticket.");
     if (session.modelId !== null && !modelById.has(session.modelId)) throw new Error("Unknown active model.");
@@ -144,6 +147,12 @@ function validateReferences(game: GameState) {
     }
     if (session.status !== "idle" && (session.ticketId === null || session.modelId === null)) {
       throw new Error("Invalid active session.");
+    }
+    if (session.ticketId !== null) {
+      if (activeTicketIds.has(session.ticketId) || game.completedTicketIds.includes(session.ticketId)) {
+        throw new Error("Invalid active ticket occupancy.");
+      }
+      activeTicketIds.add(session.ticketId);
     }
   }
   const reviewIds = new Set<string>();
@@ -164,7 +173,7 @@ function validateReferences(game: GameState) {
 
 function migrateEnvelope(value: unknown): SaveEnvelope {
   if (!value || typeof value !== "object") throw new Error("Invalid save envelope.");
-  const candidate = value as { version?: unknown; savedAt?: unknown; game?: unknown };
+  const candidate = value as { version?: unknown; savedAt?: unknown; snapshotSequence?: unknown; game?: unknown };
   let version = candidate.version;
   let game = candidate.game;
 
@@ -307,7 +316,11 @@ function migrateEnvelope(value: unknown): SaveEnvelope {
 
   const parsedGame = GameStateSchema.parse(game) as GameState;
   validateReferences(parsedGame);
-  return { version: SAVE_VERSION, savedAt: candidate.savedAt, game: parsedGame };
+  const sequence = candidate.snapshotSequence;
+  if (sequence !== undefined && (typeof sequence !== "number" || !Number.isSafeInteger(sequence) || sequence < 0)) {
+    throw new Error("Invalid snapshot sequence.");
+  }
+  return { version: SAVE_VERSION, savedAt: candidate.savedAt, ...(sequence !== undefined ? { snapshotSequence: sequence } : {}), game: parsedGame };
 }
 
 export function parseSave(serialised: string): SaveEnvelope {
@@ -318,15 +331,15 @@ export function parseSave(serialised: string): SaveEnvelope {
   }
 }
 
-export function serialiseSave(game: GameState, savedAt: number): string {
-  return JSON.stringify({ version: SAVE_VERSION, savedAt, game } satisfies SaveEnvelope, null, 2);
+export function serialiseSave(game: GameState, savedAt: number, sequence?: number): string {
+  return JSON.stringify({ version: SAVE_VERSION, savedAt, ...(sequence !== undefined ? { snapshotSequence: sequence } : {}), game } satisfies SaveEnvelope, null, 2);
 }
 
 export function saveGame(game: GameState, savedAt = Date.now()) {
-  const envelope: SaveRecord = { id: SAVE_ID, version: SAVE_VERSION, savedAt, game };
+  const envelope: SaveRecord = { id: SAVE_ID, version: SAVE_VERSION, savedAt, snapshotSequence: ++snapshotSequence, game };
   try {
     // Keep the latest snapshot available even if the tab closes before IndexedDB finishes.
-    localStorage.setItem(EMERGENCY_KEY, serialiseSave(game, savedAt));
+    localStorage.setItem(EMERGENCY_KEY, serialiseSave(game, savedAt, envelope.snapshotSequence));
   } catch {
     // IndexedDB remains the second persistence path.
   }
@@ -339,14 +352,24 @@ export async function loadGame(): Promise<SaveEnvelope | null> {
   let databaseSave: SaveEnvelope | null = null;
   try {
     const record = await getDatabase().saves.get(SAVE_ID);
-    if (record) databaseSave = migrateEnvelope(record);
+    if (record) {
+      databaseSave = migrateEnvelope(record);
+      snapshotSequence = Math.max(snapshotSequence, databaseSave.snapshotSequence ?? 0);
+    }
   } catch {
     // The local-storage snapshot is intentionally the recovery path.
   }
-  const emergency = localStorage.getItem(EMERGENCY_KEY);
+  let emergency: string | null;
+  try {
+    emergency = localStorage.getItem(EMERGENCY_KEY);
+  } catch {
+    return databaseSave;
+  }
   if (!emergency) return databaseSave;
   try {
-    return newestSave(databaseSave, parseSave(emergency));
+    const emergencySave = parseSave(emergency);
+    snapshotSequence = Math.max(snapshotSequence, emergencySave.snapshotSequence ?? 0);
+    return newestSave(databaseSave, emergencySave);
   } catch {
     return databaseSave;
   }
@@ -355,14 +378,23 @@ export async function loadGame(): Promise<SaveEnvelope | null> {
 export function newestSave(first: SaveEnvelope | null, second: SaveEnvelope | null): SaveEnvelope | null {
   if (!first) return second;
   if (!second) return first;
-  return second.savedAt > first.savedAt ? second : first;
+  if (first.savedAt !== second.savedAt) return second.savedAt > first.savedAt ? second : first;
+  // Commands share a simulation clock. Either storage path can lag after a failed write.
+  // Legacy records have no sequence and retain the emergency tie preference.
+  return (second.snapshotSequence ?? 0) >= (first.snapshotSequence ?? 0) ? second : first;
 }
 
 export async function clearSave() {
   await saveQueue;
   try {
     await getDatabase().saves.delete(SAVE_ID);
+  } catch {
+    // Storage may be unavailable; resetting the in-memory run can still proceed.
   } finally {
-    localStorage.removeItem(EMERGENCY_KEY);
+    try {
+      localStorage.removeItem(EMERGENCY_KEY);
+    } catch {
+      // Browser storage restrictions can also prevent clearing the recovery path.
+    }
   }
 }

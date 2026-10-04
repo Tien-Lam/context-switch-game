@@ -40,7 +40,7 @@ export const useGameStore = create<GameStore>((set, get) => {
     try {
       const next = command(get().game);
       set({ game: next, notice: null });
-      void saveGame(next);
+      void saveGame(next, get().lastWallClock);
       return null;
     } catch (error) {
       const message = messageFrom(error);
@@ -84,7 +84,10 @@ export const useGameStore = create<GameStore>((set, get) => {
       set({ game: next, lastWallClock: now, offlineSeconds: elapsed >= 5 ? elapsed : 0 });
       void saveGame(next, now);
     },
-    persist: async () => saveGame(get().game),
+    persist: async () => {
+      const store = get();
+      await saveGame(store.game, store.lastWallClock);
+    },
     setSpeed: (speed) => set({ speed }),
     assign: (sessionId, ticketId, modelId, improveBrief, reasoning) => commit((state) => startTicket(state, sessionId, ticketId, modelId, improveBrief, reasoning)),
     review: (reviewId, decision) => commit((state) => reviewTicket(state, reviewId, decision)),
@@ -92,7 +95,10 @@ export const useGameStore = create<GameStore>((set, get) => {
     purchase: (upgradeId) => commit((state) => buyUpgrade(state, upgradeId)),
     mitigate: (action) => commit((state) => mitigateIncident(state, action)),
     dismissNotice: () => set({ notice: null, offlineSeconds: 0 }),
-    exportSave: () => serialiseSave(get().game, Date.now()),
+    exportSave: () => {
+      const store = get();
+      return serialiseSave(store.game, store.lastWallClock);
+    },
     importSave: async (serialised) => {
       try {
         const envelope = parseSave(serialised);

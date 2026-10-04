@@ -11,6 +11,78 @@ async function launchInTab(page: import("@playwright/test").Page, index: 1 | 2, 
   await expect(page.getByRole("textbox", { name: `${provider} message` })).toBeVisible();
 }
 
+test("shell keyboard controls, input expansion and command-launched agent lifecycle", async ({ page }) => {
+  await page.goto("/");
+  const shell = page.getByRole("textbox", { name: "Terminal command" });
+  await shell.fill("mkdi");
+  await shell.press("Tab");
+  await expect(shell).toHaveValue("mkdir ");
+  await shell.fill("mkdir -p notes/qa && echo 'APP-101' > notes/qa/result.txt; cat < notes/qa/result.txt");
+  await shell.press("Enter");
+  await expect(page.locator(".line-output").last()).toContainText("APP-101");
+  await shell.fill("tickets list | grep APP-101 > notes/backlog.txt");
+  await shell.press("Enter");
+  await shell.fill("cat notes/backlog.txt");
+  await shell.press("Enter");
+  await expect(page.locator(".line-output").last()).toContainText("APP-101");
+  await shell.fill("cd notes && pwd");
+  await shell.press("Enter");
+  await shell.fill("echo $PWD");
+  await shell.press("Enter");
+  await expect(page.locator(".line-output").last()).toContainText("/home/dev/delivery/notes");
+  await shell.fill("cd -");
+  await shell.press("Enter");
+  await expect(page.locator(".terminal-prompt")).toContainText("~/delivery");
+  await shell.fill("cd notes");
+  await shell.press("Enter");
+  await shell.fill("cat $OLDPWD/RE");
+  await shell.press("Tab");
+  await expect(shell).toHaveValue("cat /home/dev/delivery/README.md ");
+  await shell.fill("forge");
+  await shell.press("Enter");
+  const agent = page.getByRole("textbox", { name: "OpenMind Forge message" });
+  await expect(page.locator(".line-system")).toContainText("~/delivery/notes");
+  await agent.fill("/status");
+  await agent.press("Enter");
+  await expect(page.locator(".line-output").last()).toContainText("~/delivery/notes");
+  await agent.fill("Could you take the next ticket?");
+  await agent.press("Enter");
+  await agent.fill("/exit");
+  await agent.press("Enter");
+  const resumedShell = page.getByRole("textbox", { name: "OpenMind Forge command" });
+  await expect(page.getByRole("button", { name: "Agent", exact: true })).toBeDisabled();
+  await expect(page.locator(".terminal-output")).toContainText("background");
+  await resumedShell.fill("anthill");
+  await resumedShell.press("Enter");
+  await expect(page.locator(".terminal-output")).toContainText("unfinished work");
+  await resumedShell.fill("discard this unfinished input");
+  await resumedShell.press("Control+c");
+  await expect(resumedShell).toHaveValue("");
+  await resumedShell.press("Control+l");
+  await expect(page.locator(".terminal-output .line-command")).toHaveCount(0);
+  await resumedShell.fill("forge");
+  await resumedShell.press("Enter");
+  await expect(agent).toBeVisible();
+  await expect(page.locator(".terminal-output")).toContainText("Could you take the next ticket?");
+  await expect(page.locator(".terminal-contextbar")).toContainText("1/1 slots");
+  await page.reload();
+  await expect(page.getByRole("textbox", { name: "OpenMind Forge message" })).toBeVisible();
+});
+
+test("terminal reviews surface the new execution-slot unlock without switching to Agent", async ({ page }) => {
+  await page.goto("/");
+  await launchInTab(page, 1, "anthill");
+  await page.getByRole("button", { name: "Terminal", exact: true }).click();
+  const terminal = page.getByRole("textbox", { name: "Anthill Code command" });
+  await terminal.fill("agents run APP-101");
+  await terminal.press("Enter");
+  await expect(page.locator(".terminal-output")).toContainText("APP-101 is ready for review", { timeout: 8_000 });
+  await terminal.fill("reviews approve APP-101");
+  await terminal.press("Enter");
+  await expect(page.locator(".terminal-output")).toContainText("Session 2 unlocked");
+  await expect(page.locator(".terminal-output")).toContainText("Both provider terminals can now run work");
+});
+
 test("starts with two shells and launches either provider by command", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByRole("tab", { name: /Terminal 1/ })).toBeVisible();
@@ -24,6 +96,40 @@ test("starts with two shells and launches either provider by command", async ({ 
   await launchInTab(page, 2, "forge");
   await expect(page.getByRole("tab", { name: /Anthill Code/ })).toBeVisible();
   await expect(page.getByRole("tab", { name: /OpenMind Forge/ })).toBeVisible();
+});
+
+test("unavailable browser storage does not prevent shell launch or a playable session", async ({ page }) => {
+  await page.addInitScript(() => {
+    for (const name of ["getItem", "setItem", "removeItem"] as const) {
+      Storage.prototype[name] = () => { throw new DOMException("Storage unavailable", "SecurityError"); };
+    }
+  });
+  await page.goto("/");
+  await expect(page.getByRole("textbox", { name: "Terminal command" })).toBeVisible();
+  await launchInTab(page, 1, "anthill");
+  const agent = page.getByRole("textbox", { name: "Anthill Code message" });
+  await agent.fill("Could you take the next ticket?");
+  await agent.press("Enter");
+  await expect(page.locator(".terminal-contextbar")).toContainText("1/1 slots");
+});
+
+test("history recalls the newest command on the first Up after reaching its cap", async ({ page }) => {
+  await page.goto("/");
+  const shell = page.getByRole("textbox", { name: "Terminal command" });
+  for (let i = 1; i <= 63; i += 1) {
+    await shell.fill(`echo ${i}`);
+    await shell.press("Enter");
+  }
+  await shell.press("ArrowUp");
+  await expect(shell).toHaveValue("echo 63");
+});
+
+test("reload restores the selected provider terminal instead of the first tab", async ({ page }) => {
+  await page.goto("/");
+  await launchInTab(page, 2, "forge");
+  await page.reload();
+  await expect(page.getByRole("textbox", { name: "OpenMind Forge message" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /OpenMind Forge/ })).toHaveAttribute("aria-selected", "true");
 });
 
 test("pre-launch shell inspects tickets but cannot assign work without an agent", async ({ page }) => {

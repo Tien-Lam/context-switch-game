@@ -4,6 +4,27 @@ import { advanceGame, buyUpgrade, startTicket } from "../src/game/engine";
 import { agentSuggestions, commandSuggestions, evaluateAgentMessage, evaluateCommand } from "../src/ui/cli";
 
 describe("operator CLI", () => {
+  it("gives an actionable recovery path for sandbox-file requests in Agent mode", () => {
+    for (const request of ["cat playtest.txt", "Please read playtest.txt", "ls"]) {
+      const result = evaluateAgentMessage(request, createInitialState());
+      expect(result.effect).toBeUndefined();
+      expect(result.messages[0].text).toContain("switch surfaces");
+      expect(result.messages[0].text).toContain("in your own words");
+    }
+  });
+  it("identifies the owning slot when another terminal requests a revision", () => {
+    const state = advanceGame(startTicket(createInitialState(), 0, "deployment-banner", "ballad"), 5);
+    const context = { providerId: "openmind", modelId: "spark", sessionId: null };
+    expect(evaluateCommand("reviews revise APP-101", state, context, true).messages[0].text).toContain("revision runs in session 1");
+    expect(evaluateAgentMessage("Please revise APP-101", state, context).messages[0].text).toContain("Revision runs in session 1");
+  });
+  it("shows the actual terminal directory in both provider status tools", () => {
+    for (const providerId of ["anthill", "openmind"]) {
+      const result = evaluateCommand("/status", createInitialState(), { providerId, cwd: "~/delivery/notes" });
+      expect(result.messages[0].text).toContain("~/delivery/notes");
+      expect(result.messages[0].text).not.toMatch(/(?:directory|project)\s+~\/delivery\n/);
+    }
+  });
   it("reads authored tickets through a terminal tool", () => {
     const result = evaluateCommand("tickets read APP-101", createInitialState());
     expect(result.messages[0].text).toContain("Rename the deployment banner");

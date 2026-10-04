@@ -1,11 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { advanceGame, compactSession, computeEnding, GameRuleError, mitigateIncident, reviewTicket, startTicket } from "../src/game/engine";
+import { advanceGame, buyUpgrade, compactSession, computeEnding, GameRuleError, mitigateIncident, reviewTicket, startTicket } from "../src/game/engine";
 import { BALANCE } from "../src/game/balance";
 import { createInitialState } from "../src/game/initialState";
 import { availableModels, availableTickets, incidentIsOpen, isReviewBlocked, visibleTickets } from "../src/game/selectors";
 import { content } from "../src/content";
 
 describe("agent simulation", () => {
+  it("rejects upgrade purchases after the ending freezes the run", () => {
+    const state = createInitialState();
+    state.completedTicketIds.push("deployment-banner");
+    state.ending = computeEnding(state);
+
+    expect(() => buyUpgrade(state, "repo-playbook")).toThrow(/run has ended/i);
+    expect(state.trust).toBe(state.ending.scores.trust);
+    expect(state.purchasedUpgradeIds).toEqual([]);
+  });
+
   it("moves completed work into a separate review queue", () => {
     const initial = createInitialState();
     const assigned = startTicket(initial, 0, "deployment-banner", "couplet", true);
@@ -143,6 +153,18 @@ describe("agent simulation", () => {
 
     expect(jittered.events.map((event) => event.id)).toEqual(coarse.events.map((event) => event.id));
     expect(jittered.reviews.map((review) => review.id)).toEqual(coarse.reviews.map((review) => review.id));
+  });
+
+  it("keeps review IDs stable when completion lands on a half-second boundary", () => {
+    const initial = advanceGame(createInitialState(), 0.5);
+    const assigned = startTicket(initial, 0, "deployment-banner", "ballad");
+    const coarse = advanceGame(assigned, 4);
+    let fine = assigned;
+    for (let step = 0; step < 40; step += 1) fine = advanceGame(fine, 0.1);
+
+    expect(coarse.reviews[0].id).toBe("deployment-banner-0-5");
+    expect(fine.reviews[0].id).toBe(coarse.reviews[0].id);
+    expect(fine.reviews[0].createdAt).toBeCloseTo(coarse.reviews[0].createdAt, 10);
   });
 
   it("tracks actual overlapping work so workspace isolation removes its risk", () => {

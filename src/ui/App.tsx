@@ -29,7 +29,7 @@ import { availableModels, availableTickets, isReviewBlocked, reviewRiskFactors, 
 import type { GameState, SessionState } from "../game/types";
 import { useGameStore } from "../app/store";
 import { agentSuggestions, commandSuggestions, evaluateAgentMessage, evaluateCommand, type CliEffect, type CliMessage, type PaneMode, type PermissionMode, type ReasoningMode } from "./cli";
-import { createVirtualFileSystem, displayShellPath, evaluateVirtualShell, SHELL_WORKSPACE, type VirtualFileSystem } from "./virtualShell";
+import { completeShellInput, createVirtualFileSystem, displayShellPath, evaluateVirtualShell, SHELL_WORKSPACE, type VirtualFileSystem } from "./virtualShell";
 
 const percent = (value: number) => `${Math.round(value)}%`;
 const clock = (seconds: number) => {
@@ -327,6 +327,8 @@ interface TerminalTabState {
   view?: PaneMode;
   surface: "agent" | "shell";
   cwd: string;
+  previousCwd?: string;
+  agentExited?: boolean;
   input: string;
   history: TerminalLine[];
   commands: string[];
@@ -341,7 +343,18 @@ let terminalLineId = 0;
 let terminalTabId = 1;
 const terminalLine = (kind: TerminalLineKind, text: string): TerminalLine => ({ id: terminalLineId += 1, kind, text });
 
-function providerBanner(providerId: string, modelId: string, state = useGameStore.getState().game) {
+function readLocal(key: string) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
+function writeLocal(key: string, value: string | null) {
+  try {
+    if (value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, value);
+  } catch { /* Storage is optional; keep the current session playable. */ }
+}
+
+function providerBanner(providerId: string, modelId: string, state = useGameStore.getState().game, cwd = SHELL_WORKSPACE) {
   const provider = providerById.get(providerId)!;
   const model = modelById.get(modelId)!;
   const nextTicket = availableTickets(state).find((ticket) => !ticket.incidentFor && ticket.kind !== "finale");
@@ -354,7 +367,7 @@ function providerBanner(providerId: string, modelId: string, state = useGameStor
       "╭──────────────────────────────────────────────────╮",
       `│ >_ ${provider.name.padEnd(44)}│`,
       `│ model:     ${(model.name + " " + model.tier).padEnd(37)}│`,
-      "│ directory: ~/delivery                            │",
+      `│ directory: ${displayShellPath(cwd).padEnd(37)}│`,
       "╰──────────────────────────────────────────────────╯",
       provider.description,
       objective,
@@ -365,7 +378,7 @@ function providerBanner(providerId: string, modelId: string, state = useGameStor
     "╭──────────────────────────────────────────────────╮",
     `│ ◆ ${provider.name.padEnd(46)}│`,
     `│ ${model.name.padEnd(48)}│`,
-    "│ ~/delivery                                       │",
+    `│ ${displayShellPath(cwd).padEnd(48)}│`,
     "╰──────────────────────────────────────────────────╯",
     provider.description,
     objective,
@@ -377,7 +390,7 @@ function defaultModel(providerId: string) {
   return providerId === "openmind" ? "spark" : "ballad";
 }
 
-const shellOnlyCommands = new Set(["tickets", "reviews", "review", "diff", "incident", "events", "upgrades", "agents", "speed", "tab", "pane", "watch", "dashboard", "save", "restart", "clear", "trace", "mux", "sound", "motion"]);
+const shellOnlyCommands = new Set(["help", "tickets", "reviews", "review", "diff", "incident", "events", "upgrades", "agents", "speed", "tab", "pane", "watch", "dashboard", "save", "restart", "clear", "trace", "mux", "sound", "motion"]);
 
 function createTerminalTab(name?: string): TerminalTabState {
   const id = `term-${terminalTabId}`;
@@ -470,10 +483,13 @@ export function App() {
     } catch { /* A broken sandbox should not block the game. */ }
     return createVirtualFileSystem();
   });
-  const [activeTabId, setActiveTabId] = useState(() => tabs[0].id);
-  const [paneTabId, setPaneTabId] = useState<string | null>(() => localStorage.getItem("context-switch-pane-tab-v1"));
-  const [soundEnabled, setSoundEnabled] = useState(() => localStorage.getItem("context-switch-sound-v1") === "on");
-  const [reduceMotion, setReduceMotion] = useState(() => localStorage.getItem("context-switch-motion-v1") === "reduce");
+  const [activeTabId, setActiveTabId] = useState(() => {
+    const saved = readLocal("context-switch-active-tab-v1");
+    return tabs.some((tab) => tab.id === saved) ? saved! : tabs[0].id;
+  });
+  const [paneTabId, setPaneTabId] = useState<string | null>(() => readLocal("context-switch-pane-tab-v1"));
+  const [soundEnabled, setSoundEnabled] = useState(() => readLocal("context-switch-sound-v1") === "on");
+  const [reduceMotion, setReduceMotion] = useState(() => readLocal("context-switch-motion-v1") === "reduce");
   const outputRef = useRef<HTMLDivElement>(null);
   const secondaryOutputRef = useRef<HTMLDivElement>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
@@ -617,12 +633,12 @@ export function App() {
     if (effect.type === "mitigate") failure = store.mitigate(effect.action);
     if (effect.type === "speed") store.setSpeed(effect.speed);
     if (effect.type === "clear") updateTab(tabId, (tab) => surface === "shell" ? { ...tab, shellHistory: [] } : { ...tab, history: [] });
-    if (effect.type === "new-session") updateTab(tabId, (tab) => tab.providerId && tab.modelId ? { ...tab, history: [terminalLine("system", providerBanner(tab.providerId, tab.modelId, store.game))], input: "", commands: [], commandCursor: 0 } : tab);
+    if (effect.type === "new-session") updateTab(tabId, (tab) => tab.providerId && tab.modelId ? { ...tab, history: [terminalLine("system", providerBanner(tab.providerId, tab.modelId, store.game, tab.cwd))], input: "", commands: [], commandCursor: 0 } : tab);
     if (effect.type === "model") updateTab(tabId, (tab) => ({
       ...tab,
       modelId: effect.modelId,
       history: tab.history.map((line, index) => index === 0 && line.kind === "system"
-        ? { ...line, text: providerBanner(tab.providerId ?? "anthill", effect.modelId, store.game) }
+        ? { ...line, text: providerBanner(tab.providerId ?? "anthill", effect.modelId, store.game, tab.cwd) }
         : line),
     }));
     if (effect.type === "permissions") updateTab(tabId, (tab) => ({ ...tab, permissionMode: effect.mode }));
@@ -658,22 +674,46 @@ export function App() {
     if (!tab || tab.kind !== "provider") return;
     const surface = requestedSurface ?? tab.surface;
     updateTab(tabId, (current) => surface === "shell"
-      ? { ...current, shellInput: "", shellCommands: [...current.shellCommands, command].slice(-60), shellCommandCursor: current.shellCommands.length + 1 }
-      : { ...current, input: "", commands: [...current.commands, command].slice(-60), commandCursor: current.commands.length + 1 });
+      ? { ...current, shellInput: "", shellCommands: [...current.shellCommands, command].slice(-60), shellCommandCursor: Math.min(60, current.shellCommands.length + 1) }
+      : { ...current, input: "", commands: [...current.commands, command].slice(-60), commandCursor: Math.min(60, current.commands.length + 1) });
     appendLines(tabId, [terminalLine("command", command)], surface);
+    const context = { providerId: tab.providerId ?? "anthill", modelId: tab.modelId, permissionMode: tab.permissionMode, reasoning: tab.reasoning, sessionId: tab.boundSessionId ?? null, cwd: displayShellPath(tab.cwd) };
+    if (command === "exit" || command === "/exit") {
+      updateTab(tabId, (current) => ({ ...current, surface: "shell", agentExited: Boolean(current.providerId) }));
+      appendLines(tabId, [terminalLine("system", tab.providerId
+        ? `Returned to shell. Agent work continues in the background. Type \`${tab.providerId === "openmind" ? "forge" : "anthill"}\` to resume this conversation, or use the other terminal for another provider.`
+        : "Already at the shell. Launch anthill or forge; use tab close to close a tab.")], "shell");
+      return;
+    }
     if (surface === "shell") {
-      const result = evaluateVirtualShell(command, useGameStore.getState().game, tab.cwd, virtualFs, [...tab.shellCommands, command]);
+      const result = evaluateVirtualShell(command, useGameStore.getState().game, tab.cwd, virtualFs, [...tab.shellCommands, command], {
+        previousCwd: tab.previousCwd,
+        evaluateGameCommand: (raw) => {
+          const result = evaluateCommand(raw, useGameStore.getState().game, context, true);
+          if (result.effect) return { error: "Only read-only game tools can be chained or piped." };
+          const error = result.messages.find((message) => message.kind === "error");
+          return error ? { error: error.text } : { text: result.messages.map((message) => message.text).join("\n") };
+        },
+      });
       setVirtualFs(result.fs);
       if (result.handled) {
-        if (result.cwd !== tab.cwd) updateTab(tabId, (current) => ({ ...current, cwd: result.cwd }));
+        if (result.cwd !== tab.cwd || result.previousCwd !== tab.previousCwd) updateTab(tabId, (current) => ({ ...current, cwd: result.cwd, previousCwd: result.previousCwd }));
+        if (result.text) appendLines(tabId, [terminalLine("output", result.text)], "shell");
         if (result.error) appendLines(tabId, [terminalLine("error", `error: ${result.error}`)], "shell");
-        else if (result.text) appendLines(tabId, [terminalLine("output", result.text)], "shell");
         return;
       }
     }
-    if (!tab.providerId) {
-      const launchId = command.toLowerCase() === "anthill" ? "anthill" : command.toLowerCase() === "forge" ? "openmind" : undefined;
+    const launchId = surface === "shell" ? command.toLowerCase() === "anthill" ? "anthill" : command.toLowerCase() === "forge" ? "openmind" : undefined : undefined;
       if (launchId) {
+        const ownedWork = tab.boundSessionId === undefined ? undefined : useGameStore.getState().game.sessions[tab.boundSessionId];
+        if (tab.providerId && tab.providerId !== launchId && ownedWork?.status !== "idle" && ownedWork?.ticketId) {
+          appendLines(tabId, [terminalLine("error", "This tab owns unfinished work. Resume its agent to review it, or launch the other provider in another terminal.")], "shell");
+          return;
+        }
+        if (tab.providerId === launchId) {
+          updateTab(tabId, (current) => ({ ...current, surface: "agent", agentExited: false }));
+          return;
+        }
         const modelId = defaultModel(launchId);
         updateTab(tabId, (current) => ({
           ...current,
@@ -683,7 +723,9 @@ export function App() {
           permissionMode: launchId === "openmind" ? "workspace-write" : "ask",
           reasoning: "medium",
           surface: "agent",
-          history: [terminalLine("system", providerBanner(launchId, modelId))],
+          agentExited: false,
+          boundSessionId: undefined,
+          history: [terminalLine("system", providerBanner(launchId, modelId, useGameStore.getState().game, tab.cwd))],
           input: "",
           commands: [],
           commandCursor: 0,
@@ -691,13 +733,13 @@ export function App() {
         }));
         return;
       }
+    if (!tab.providerId || tab.agentExited) {
       const root = command.split(/\s+/)[0].replace(/^\//, "").toLowerCase();
       if (!shellOnlyCommands.has(root) || (root === "agents" && !/^agents(?:\s+list)?$/i.test(command))) {
         appendLines(tabId, [terminalLine("error", "error: launch an agent with `anthill` or `forge` first; run `help` for terminal tools")], "shell");
         return;
       }
     }
-    const context = { providerId: tab.providerId ?? "anthill", modelId: tab.modelId, permissionMode: tab.permissionMode, reasoning: tab.reasoning, sessionId: tab.boundSessionId ?? null };
     const result = surface === "shell" ? evaluateCommand(command, useGameStore.getState().game, context, true) : evaluateAgentMessage(command, useGameStore.getState().game, context);
     if (result.messages.length) appendLines(tabId, result.messages.map((message) => terminalLine(message.kind, message.text)), surface);
     if (result.effect) await applyEffect(result.effect, tabId, surface);
@@ -710,7 +752,7 @@ export function App() {
       let changed = false;
       const next = current.map((tab) => {
         if (tab.kind !== "provider" || !tab.providerId || !tab.modelId || tab.history[0]?.kind !== "system") return tab;
-        const banner = providerBanner(tab.providerId, tab.modelId, game);
+        const banner = providerBanner(tab.providerId, tab.modelId, game, tab.cwd);
         if (tab.history[0].text === banner) return tab;
         changed = true;
         return { ...tab, history: [{ ...tab.history[0], text: banner }, ...tab.history.slice(1)] };
@@ -726,14 +768,14 @@ export function App() {
     document.addEventListener("visibilitychange", onVisibility);
     return () => { window.clearInterval(interval); window.clearInterval(autosave); document.removeEventListener("visibilitychange", onVisibility); };
   }, [hydrate, hydrated, persist, pulse, reconcile]);
-  useEffect(() => { localStorage.setItem("context-switch-terminal-tabs-v3", JSON.stringify(tabs)); }, [tabs]);
-  useEffect(() => { localStorage.setItem("context-switch-virtual-fs-v1", JSON.stringify(virtualFs)); }, [virtualFs]);
+  useEffect(() => { writeLocal("context-switch-terminal-tabs-v3", JSON.stringify(tabs)); }, [tabs]);
+  useEffect(() => { writeLocal("context-switch-active-tab-v1", activeTabId); }, [activeTabId]);
+  useEffect(() => { writeLocal("context-switch-virtual-fs-v1", JSON.stringify(virtualFs)); }, [virtualFs]);
   useEffect(() => {
-    if (paneTabId) localStorage.setItem("context-switch-pane-tab-v1", paneTabId);
-    else localStorage.removeItem("context-switch-pane-tab-v1");
+    writeLocal("context-switch-pane-tab-v1", paneTabId);
   }, [paneTabId]);
-  useEffect(() => { localStorage.setItem("context-switch-sound-v1", soundEnabled ? "on" : "off"); }, [soundEnabled]);
-  useEffect(() => { localStorage.setItem("context-switch-motion-v1", reduceMotion ? "reduce" : "auto"); }, [reduceMotion]);
+  useEffect(() => { writeLocal("context-switch-sound-v1", soundEnabled ? "on" : "off"); }, [soundEnabled]);
+  useEffect(() => { writeLocal("context-switch-motion-v1", reduceMotion ? "reduce" : "auto"); }, [reduceMotion]);
   useEffect(() => {
     const newest = game.events[0];
     if (!newest) return;
@@ -765,7 +807,7 @@ export function App() {
       const target = boundTarget ?? providerTarget ?? (currentTab.kind === "provider" ? activeTabId : tabs.find((tab) => tab.kind === "provider")?.id);
       if (target) {
         const destination = tabs.find((tab) => tab.id === target);
-        appendLines(target, [terminalLine("event", `[${event.tone}] ${event.title}\n${event.message}`)], destination?.providerId ? "agent" : "shell");
+        appendLines(target, [terminalLine("event", `[${event.tone}] ${event.title}\n${event.message}`)], destination?.surface ?? "shell");
       }
     }
   }, [game.events, soundEnabled]);
@@ -799,6 +841,35 @@ export function App() {
     const surface = tab.surface;
     const commands = surface === "shell" ? tab.shellCommands : tab.commands;
     const cursor = surface === "shell" ? tab.shellCommandCursor : tab.commandCursor;
+    if (event.ctrlKey && event.key.toLowerCase() === "c") {
+      // Preserve normal copy when text is selected. This clears input, not scripted jobs.
+      if (event.currentTarget.selectionStart !== event.currentTarget.selectionEnd) return;
+      event.preventDefault();
+      updateTab(tab.id, (current) => surface === "shell" ? { ...current, shellInput: "" } : { ...current, input: "" });
+      appendLines(tab.id, [terminalLine("muted", "^C · input cleared; background work continues")], surface);
+      return;
+    }
+    if (event.ctrlKey && event.key.toLowerCase() === "l") {
+      event.preventDefault();
+      updateTab(tab.id, (current) => surface === "shell" ? { ...current, shellHistory: [] } : { ...current, history: [] });
+      return;
+    }
+    if (event.ctrlKey && event.key.toLowerCase() === "d" && !(surface === "shell" ? tab.shellInput : tab.input)) {
+      event.preventDefault();
+      void execute("exit", tab.id, surface);
+      return;
+    }
+    if (event.key === "Tab" && !event.shiftKey && surface === "shell" && tab.shellInput) {
+      const completion = completeShellInput(tab.shellInput, tab.cwd, virtualFs, { cursor: event.currentTarget.selectionStart ?? tab.shellInput.length, previousCwd: tab.previousCwd });
+      if (completion.matches.length) {
+        event.preventDefault();
+        updateTab(tab.id, (current) => ({ ...current, shellInput: completion.input }));
+        if (completion.matches.length > 1) appendLines(tab.id, [terminalLine("muted", completion.matches.join("  "))], "shell");
+        const input = event.currentTarget;
+        window.requestAnimationFrame(() => input.setSelectionRange(completion.cursor, completion.cursor));
+      }
+      return;
+    }
     if (event.key === "Enter") void execute(surface === "shell" ? tab.shellInput : tab.input, tab.id, surface);
     if (event.key === "ArrowUp") {
       event.preventDefault();
@@ -834,13 +905,13 @@ export function App() {
         {tab.kind === "provider" ? (
           <section className="terminal-shell" aria-label={`${provider?.name ?? tab.name} session`}>
             <div className="surface-switch" role="group" aria-label={`${provider?.name ?? tab.name} surface`}>
-              <button disabled={!tab.providerId} aria-pressed={!shell} className={!shell ? "active" : ""} onClick={() => updateTab(tab.id, (current) => ({ ...current, surface: "agent" }))}>Agent</button>
+              <button disabled={!tab.providerId || tab.agentExited} aria-pressed={!shell} className={!shell ? "active" : ""} onClick={() => updateTab(tab.id, (current) => ({ ...current, surface: "agent" }))}>Agent</button>
               <button aria-pressed={shell} className={shell ? "active" : ""} onClick={() => updateTab(tab.id, (current) => ({ ...current, surface: "shell" }))}>Terminal</button>
-              <span>{!tab.providerId ? "Launch an agent by command" : shell ? "Exact tool commands" : "Ask in your own words"}</span>
+              <span>{!tab.providerId || tab.agentExited ? "Launch an agent by command" : shell ? "Exact tool commands" : "Ask in your own words"}</span>
             </div>
             <div className="terminal-output" ref={secondary ? secondaryOutputRef : outputRef} role="log" aria-live="polite">
               {visibleHistory.map((line) => <div className={`terminal-line line-${line.kind}`} key={line.id}>{line.kind === "command" && <span className="line-prompt">{shell ? "$" : tab.providerId === "openmind" ? "›" : ">"}</span>}<pre>{line.text}</pre></div>)}
-              <div className={`command-launchers ${shell ? "shell-suggestions" : "agent-suggestions"}`} aria-label={`${provider?.name ?? tab.name} suggested ${shell ? "commands" : "prompts"}`}>{(!tab.providerId ? ["anthill", "forge", "ls", "tickets list", "help"] : shell ? commandSuggestions(tab.providerId, game) : agentSuggestions(tab.providerId, game)).map((suggestion) => <button key={suggestion} onClick={() => void execute(suggestion, tab.id, tab.surface)}>{suggestion}</button>)}</div>
+              <div className={`command-launchers ${shell ? "shell-suggestions" : "agent-suggestions"}`} aria-label={`${provider?.name ?? tab.name} suggested ${shell ? "commands" : "prompts"}`}>{(!tab.providerId || tab.agentExited ? ["anthill", "forge", "ls", "tickets list", "help"] : shell ? commandSuggestions(tab.providerId, game) : agentSuggestions(tab.providerId, game)).map((suggestion) => <button key={suggestion} onClick={() => void execute(suggestion, tab.id, tab.surface)}>{suggestion}</button>)}</div>
             </div>
             <div className={`terminal-prompt prompt-${tab.providerId ?? "terminal"}`}>
               {shell && <span className="prompt-path">{displayShellPath(tab.cwd)}</span>}

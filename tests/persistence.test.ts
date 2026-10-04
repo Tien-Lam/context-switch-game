@@ -1,8 +1,46 @@
-import { describe, expect, it } from "vitest";
-import { newestSave, parseSave, SAVE_VERSION, serialiseSave } from "../src/app/persistence";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { clearSave, loadGame, newestSave, parseSave, SAVE_VERSION, saveGame, serialiseSave, type SaveEnvelope } from "../src/app/persistence";
 import { content } from "../src/content";
 import { advanceGame, startTicket } from "../src/game/engine";
 import { createInitialState } from "../src/game/initialState";
+
+const databaseStorage = vi.hoisted(() => ({ record: null as SaveEnvelope | null, failWrites: false }));
+
+vi.mock("dexie", () => ({ default: class {
+  saves = {
+    get: async () => databaseStorage.record,
+    put: async (record: SaveEnvelope) => {
+      if (databaseStorage.failWrites) throw new Error("Database unavailable");
+      databaseStorage.record = structuredClone(record);
+    },
+    delete: async () => { databaseStorage.record = null; },
+  };
+  version() { return { stores: () => this }; }
+} }));
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  databaseStorage.record = null;
+  databaseStorage.failWrites = false;
+});
+
+function emergencyStorage() {
+  let value: string | null = null;
+  let failWrites = false;
+  vi.stubGlobal("localStorage", {
+    getItem: () => value,
+    setItem: (_key: string, next: string) => {
+      if (failWrites) throw new DOMException("Storage full", "QuotaExceededError");
+      value = next;
+    },
+    removeItem: () => { value = null; },
+  });
+  return {
+    failWrites: () => { failWrites = true; },
+    read: () => value === null ? null : parseSave(value),
+    seed: (next: string) => { value = next; },
+  };
+}
 
 describe("save envelope", () => {
   it("round-trips a complete game state", () => {
@@ -22,6 +60,86 @@ describe("save envelope", () => {
 
     expect(newestSave(oldSave, emergency)).toBe(emergency);
     expect(newestSave(emergency, oldSave)).toBe(emergency);
+  });
+
+  it("prefers the emergency snapshot when a newer command shares the database timestamp", () => {
+    const databaseSave = parseSave(serialiseSave(createInitialState(), 1_000));
+    const assigned = startTicket(createInitialState(), 0, "deployment-banner", "ballad");
+    const emergency = parseSave(serialiseSave(assigned, 1_000));
+
+    expect(newestSave(databaseSave, emergency)).toBe(emergency);
+  });
+
+  it("loads the newer database command when an equal-clock emergency write fails", async () => {
+    const storage = emergencyStorage();
+    const initial = createInitialState();
+    await saveGame(initial, 1_000);
+    storage.failWrites();
+    const assigned = startTicket(initial, 0, "deployment-banner", "ballad");
+    await saveGame(assigned, 1_000);
+
+    expect(storage.read()?.game.sessions[0].status).toBe("idle");
+    expect((await loadGame())?.game).toEqual(assigned);
+  });
+
+  it("loads the newer emergency command when an equal-clock database write fails", async () => {
+    emergencyStorage();
+    const initial = createInitialState();
+    await saveGame(initial, 1_000);
+    databaseStorage.failWrites = true;
+    const assigned = startTicket(initial, 0, "deployment-banner", "ballad");
+    await expect(saveGame(assigned, 1_000)).rejects.toThrow("Database unavailable");
+
+    expect(databaseStorage.record?.game.sessions[0].status).toBe("idle");
+    expect((await loadGame())?.game).toEqual(assigned);
+  });
+
+  it("seeds command ordering from both valid storage records after loading", async () => {
+    const storage = emergencyStorage();
+    const game = createInitialState();
+    databaseStorage.record = parseSave(serialiseSave(game, 2_000, 50_000));
+    storage.seed(serialiseSave(game, 1_000, 60_000));
+
+    expect((await loadGame())?.savedAt).toBe(2_000);
+    await saveGame(game, 2_000);
+    expect(storage.read()?.snapshotSequence).toBeGreaterThan(60_000);
+    expect(databaseStorage.record?.snapshotSequence).toBe(storage.read()?.snapshotSequence);
+  });
+
+  it("preserves and validates optional snapshot metadata while keeping simulation time first", () => {
+    const game = createInitialState();
+    const earlier = parseSave(serialiseSave(game, 1_000, 20));
+    const later = parseSave(serialiseSave(game, 2_000, 10));
+    expect(earlier.snapshotSequence).toBe(20);
+    expect(newestSave(earlier, later)).toBe(later);
+    for (const snapshotSequence of [-1, 0.5, "1", null, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => parseSave(JSON.stringify({ version: SAVE_VERSION, savedAt: 1_000, snapshotSequence, game }))).toThrow(/invalid/i);
+    }
+  });
+
+  it("can load and clear when browser storage is unavailable", async () => {
+    vi.stubGlobal("localStorage", {
+      getItem: () => { throw new DOMException("Access denied", "SecurityError"); },
+      removeItem: () => { throw new DOMException("Access denied", "SecurityError"); },
+    });
+
+    await expect(loadGame()).resolves.toBeNull();
+    await expect(clearSave()).resolves.toBeUndefined();
+  });
+
+  it("rejects duplicate active tickets and active tickets that were already shipped", () => {
+    const duplicated = createInitialState();
+    duplicated.unlockedSessions = 2;
+    for (const session of duplicated.sessions.slice(0, 2)) {
+      session.status = "working";
+      session.ticketId = "deployment-banner";
+      session.modelId = "ballad";
+    }
+    expect(() => parseSave(serialiseSave(duplicated, 1_000))).toThrow(/invalid/i);
+
+    const alreadyShipped = structuredClone(startTicket(createInitialState(), 0, "deployment-banner", "ballad"));
+    alreadyShipped.completedTicketIds.push("deployment-banner");
+    expect(() => parseSave(serialiseSave(alreadyShipped, 1_000))).toThrow(/invalid/i);
   });
 
   it("makes offline catch-up equivalent to normal elapsed simulation", () => {
