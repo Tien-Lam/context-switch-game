@@ -1,7 +1,7 @@
 import { content, modelById, providerById, ticketById, upgradeById } from "../content";
 import { CACHE_DECISIONS, CACHE_EVIDENCE, CACHE_PROVIDER_HABITS } from "../content/cacheDecisions";
 import { BALANCE } from "../game/balance";
-import { getCacheRevisionQuote, getCacheReviewEvidence } from "../game/decisionDepth";
+import { getCacheRevisionQuote, getQuotaThrottleCue, getReviewEvidence, getRevisionQuote } from "../game/decisionDepth";
 import { availableModels, availableTickets, incidentIsOpen, isReviewBlocked, projectedTicketRisk, reviewRiskFactors, ticketProgressLabel, visibleTickets } from "../game/selectors";
 import type { CacheRevisionOptions, GameState, IncidentMitigation, ReviewDecision } from "../game/types";
 
@@ -56,6 +56,7 @@ export interface CliResult {
 const output = (text: string, kind: CliMessage["kind"] = "output"): CliMessage => ({ kind, text });
 const error = (text: string): CliResult => ({ messages: [output(`error: ${text}`, "error")] });
 const pad = (value: string | number, width: number) => String(value).padEnd(width, " ");
+const workSeconds = (value: number) => Number(value.toFixed(2));
 const defaultContext: CliContext = { providerId: "anthill", modelId: "ballad", permissionMode: "ask", reasoning: "medium" };
 
 function findTicket(reference?: string) {
@@ -134,7 +135,7 @@ function providerHelp(state: GameState, context: CliContext) {
         "  /diff <KEY>               inspect a pending change",
       ]
     : [
-        "  /reasoning [LEVEL]        low +7 risk | medium | high −9 risk, −4 quota",
+        "  /reasoning [LEVEL]        medium | high −9 risk, 4 extra upfront quota",
         "  /compact [SESSION]        condense the active work context",
         "  /review <KEY>             inspect a local change",
         "  /init                     inspect repository guidance",
@@ -166,6 +167,7 @@ function agentHelp(state: GameState, context: CliContext) {
     next ? `Try: “Could you take the next ticket?” or “What is ${next.key} about?”` : "Ask about pending reviews or the current work.",
     "Ask what changed or whether a review is safe before you approve it.",
     "For a cache review, ask to restore invalidation, bypass the cache for now, or use a contract ledger or isolated probes.",
+    "Ask to switch to a named model, or say ‘Please plan the next ticket’ (5 quota per assignment).",
     "Use /status, /model, /permissions, or /new for session controls.",
     "Switch to Terminal for exact backlog, review, incident, and multiplexer tools.",
   ].join("\n");
@@ -181,6 +183,7 @@ function status(state: GameState, context: CliContext) {
       "SESSION CONFIGURATION",
       `  model              ${model?.name ?? "unselected"}`,
       `  reasoning          ${context.reasoning ?? "medium"}`,
+      ...(active && active.reasoning !== (context.reasoning ?? "medium") ? [`  active job effort  ${active.reasoning} · selected effort applies to future assignments`] : []),
       `  directory          ${context.cwd ?? "~/delivery"}`,
       `  permissions        ${context.permissionMode ?? "workspace-write"}`,
       `  quota              ${Math.round(state.providerQuota[context.providerId] ?? 0)}/${provider?.maxQuota ?? 0}`,
@@ -199,6 +202,7 @@ function status(state: GameState, context: CliContext) {
     `  plan usage         ${Math.round(state.providerQuota[context.providerId] ?? 0)}/${provider?.maxQuota ?? 0} remaining`,
     `  context            ${active ? `${Math.round(active.context)}% left` : "fresh"}`,
     `  current task       ${ticket ? `${ticket.key} · ${Math.round((active?.progress ?? 0) * 100)}%` : "none"}`,
+    ...(active && active.reasoning !== (context.reasoning ?? "medium") ? [`  active job effort  ${active.reasoning} · future assignments use ${context.reasoning ?? "medium"}`] : []),
     `  task state         ${active?.status ?? "idle"}`,
     `  trust / health     ${Math.round(state.trust)} / ${Math.round(state.repoHealth)}`,
     `  repository debt    ${Math.round(state.debt)}`,
@@ -209,11 +213,18 @@ function listTickets(state: GameState, context: CliContext) {
   const header = `${pad("KEY", 10)} ${pad("STATE", 12)} ${pad("BASE/EST", 14)} TITLE`;
   const rows = visibleTickets(state).map((ticket) => {
     const progress = ticketProgressLabel(state, ticket.id).toUpperCase();
-    const estimate = projectedTicketRisk(state, ticket.id, context.permissionMode === "plan", context.reasoning, context.modelId);
+    const estimate = projectedTicketRisk(state, ticket.id, context.permissionMode === "plan", availableModels(state).some((model) => model.id === context.modelId) ? context.reasoning : "medium", context.modelId);
     const risk = `${Math.round(ticket.baseRisk * 100)}%/${estimate.min}-${estimate.max}%${ticket.riskFlag === "none" ? "" : " !"}`;
     return `${pad(ticket.key, 10)} ${pad(progress, 12)} ${pad(risk, 14)} ${ticket.title}${ticket.optional ? " [optional]" : ""}`;
   });
-  return [header, ...rows, "", `Risk is ticket baseline / estimate for the selected model and ${context.reasoning} reasoning with current repo, session, and upgrades, including expected work context decay. Future parallel work or repo changes can alter the result. Plan mode lowers the estimate; ! marks a known review finding.`].join("\n");
+  return [header, ...rows, "", `Risk is ticket baseline / estimate ${estimateAssumptions(state, context)} with current repo, session, and upgrades, including expected work context decay. Future parallel work or repo changes can alter the result. Plan mode lowers the estimate; ! marks a known review finding.`].join("\n");
+}
+
+function estimateAssumptions(state: GameState, context?: CliContext) {
+  const model = availableModels(state).find((candidate) => candidate.id === context?.modelId);
+  return model
+    ? `for the selected model ${model.name} and ${context?.reasoning ?? "medium"} reasoning`
+    : "across available models (recommended tier when available; provisional, no model selected, medium reasoning)";
 }
 
 function readTicket(state: GameState, reference?: string, context?: CliContext) {
@@ -227,7 +238,7 @@ function readTicket(state: GameState, reference?: string, context?: CliContext) 
     : ticket.id === "retry-repair" && ["active", "scaled"].includes(state.incidentResponse)
       ? ", incident mitigation:open"
       : "";
-  const estimate = projectedTicketRisk(state, ticket.id, context?.permissionMode === "plan", context?.reasoning, context?.modelId);
+  const estimate = projectedTicketRisk(state, ticket.id, context?.permissionMode === "plan", availableModels(state).some((model) => model.id === context?.modelId) ? context?.reasoning : "medium", context?.modelId);
   const knownFinding = ticket.riskFlag === "none" ? "" : " · ! known review finding";
   return {
     messages: [output([
@@ -238,7 +249,7 @@ function readTicket(state: GameState, reference?: string, context?: CliContext) 
       `brief       ${ticket.brief}`,
       `depends     ${dependencies}${incidentDependency}`,
       `files       ${ticket.files.join(", ")}`,
-      `risk        ${Math.round(ticket.baseRisk * 100)}% base · ${estimate.min}-${estimate.max}% estimated with selected ${content.models.find((model) => model.id === context?.modelId)?.name ?? "model"} and ${context?.reasoning ?? "medium"} reasoning · ${ticket.recommendedTier} model recommended${knownFinding}`,
+      `risk        ${Math.round(ticket.baseRisk * 100)}% base · ${estimate.min}-${estimate.max}% estimated ${estimateAssumptions(state, context)} · ${ticket.recommendedTier} model recommended${knownFinding}`,
       `reward      +${ticket.rewardTrust} trust`,
       "",
       ticket.summary,
@@ -290,10 +301,9 @@ function readReview(state: GameState, reference?: string) {
   if (!ticket || !review) return error("no pending review for that ticket");
   const session = state.sessions[review.sessionId];
   const unresolvedFinding = isReviewBlocked(state, review);
-  const resolution = ticket.riskFlag !== "none" && (session.reviewRound > 0 || (session.briefImproved && review.risk < 0.2)) ? ticket.evidence.resolution : undefined;
-  const warning = resolution?.signal ?? ticket.evidence.signal;
-  const tests = resolution?.tests ?? ticket.evidence.tests;
-  const cacheEvidence = getCacheReviewEvidence(state, review);
+  const evidence = getReviewEvidence(state, review) ?? { ...ticket.evidence, scope: undefined };
+  const revisionQuote = getRevisionQuote(state, review.id);
+  const revisionCue = revisionQuote ? getQuotaThrottleCue(state, { sessionId: review.sessionId, modelId: session.modelId ?? "", seconds: revisionQuote.seconds, setupQuota: revisionQuote.setupQuota, helperNeeded: revisionQuote.cache?.helperNeeded }) : null;
   const cacheQuote = getCacheRevisionQuote(state, review.id);
   const habit = CACHE_PROVIDER_HABITS[modelById.get(session.modelId ?? "")?.providerId as keyof typeof CACHE_PROVIDER_HABITS];
   const cacheChoices = cacheQuote ? [
@@ -327,12 +337,18 @@ function readReview(state: GameState, reference?: string) {
       `REVIEW ${ticket.key} · review risk score ${Math.round(review.risk * 100)}/100`,
       `gate        ${unresolvedFinding ? "unresolved finding" : "passed"}`,
       `risk source ${reviewRiskFactors(state, review)}`,
-      `change      ${cacheEvidence?.summary ?? resolution?.summary ?? (session.reviewRound > 0 ? `Revised: ${ticket.evidence.summary}` : ticket.evidence.summary)}`,
-      `tests       ${cacheEvidence?.tests ?? tests}`,
-      `warning     ${cacheEvidence?.signal ?? warning}`,
+      `change      ${evidence.summary}`,
+      `tests       ${evidence.tests}`,
+      `warning     ${evidence.signal}`,
       ...history,
-      `scope       ${cacheEvidence?.scope ?? `${ticket.files.length} files · ${ticket.files.join(", ")}`}`,
+      `scope       ${evidence.scope ?? `${ticket.files.length} files · ${ticket.files.join(", ")}`}`,
       `guidance    ${recommendation}`,
+      ...(revisionQuote ? [
+        `revision    ${revisionQuote.finding} · ${workSeconds(revisionQuote.seconds)}s work · ${revisionQuote.setupQuota} upfront provider quota`,
+        `quota       owner ${revisionQuote.quotaRate.toFixed(1)} quota/work-second${revisionQuote.helperQuotaRate ? ` · helper ${revisionQuote.helperQuotaRate.toFixed(1)} quota/work-second` : ""} ongoing; separate from upfront setup`,
+        `context     ${Math.round(revisionQuote.contextAfterSetup)}% after setup (+${revisionQuote.contextGain}) · ~${Math.round(revisionQuote.contextAfterWork)}% after work`,
+      ] : []),
+      ...(revisionCue ? [`timing      ${revisionCue.message}`] : []),
       ...cacheChoices,
       "",
       `approve     reviews approve ${ticket.key}    ship now; ${unresolvedFinding ? "known defect escapes" : "gate passed"}`,
@@ -352,7 +368,8 @@ function quota(state: GameState, context?: CliContext) {
 
 function upgrades(state: GameState) {
   return [
-    `${pad("ID", 24)} ${pad("COST", 8)} ${pad("STATE", 12)} UPGRADE`,
+    `Trust balance: ${Math.round(state.trust)} · purchases spend trust`,
+    `${pad("ID", 24)} ${pad("TRUST", 8)} ${pad("STATE", 12)} UPGRADE`,
     ...content.upgrades.map((upgrade) => {
       const bought = state.purchasedUpgradeIds.includes(upgrade.id);
       const ticketReady = !upgrade.requiresTicketId || state.completedTicketIds.includes(upgrade.requiresTicketId);
@@ -373,8 +390,8 @@ function muxStatus(state: GameState) {
   const dashboard = state.purchasedUpgradeIds.includes("terminal-dashboard");
   return [
     "TERMINAL CAPABILITIES",
-    "  [ready]  Anthill Code session       tab 1 · full window",
-    "  [ready]  OpenMind Forge session     tab 2 · full window",
+    "  [ready]  Anthill Code session       launch anthill in any terminal · full window",
+    "  [ready]  OpenMind Forge session     launch forge in any terminal · full window",
     `  ${shipped >= 1 ? "[ready]" : "[locked]"} parallel execution          ${shipped >= 1 ? "2 agent slots" : "ship 1 ticket"}`,
     `  ${shipped >= 3 ? "[ready]" : "[locked]"} third execution slot        ${shipped >= 3 ? "3 agent slots" : "ship 3 tickets"}`,
     `  ${shipped >= 1 ? "[ready]" : "[locked]"} extra terminal tabs         ${shipped >= 1 ? "tab new, then anthill|forge" : "ship 1 ticket"}`,
@@ -425,14 +442,43 @@ function runTicket(state: GameState, context: CliContext, reference?: string, to
     : models.find((candidate) => candidate.tier === ticket.recommendedTier) ?? models[0];
   if (!model || model.providerId !== context.providerId) return error("that model belongs to the other provider CLI");
   if (!models.some((candidate) => candidate.id === model.id)) return error("model is locked or unknown; use `/model`");
-  const improveBrief = context.permissionMode === "plan" || tokens.includes("--brief") || /\b(plan|clarify|careful|brief)\b/i.test(naturalPrompt);
-  const reasoning = context.providerId === "openmind" ? context.reasoning ?? "medium" : "medium";
+  const constraints = tokens.length ? {} : taskConstraints(naturalPrompt, ticket.key, ticket.id);
+  if (constraints.clarification) return { messages: [output(`No work started. ${constraints.clarification}`, "muted")] };
+  const improveBrief = context.permissionMode === "plan" || tokens.includes("--brief") || constraints.improveBrief === true || /\b(plan|clarify|careful|brief)\b/i.test(naturalPrompt);
+  const reasoning = context.providerId === "openmind" && context.reasoning === "high" ? "high" : "medium";
+  const setupQuota = (improveBrief ? BALANCE.improvedBriefQuotaCost : 0) + (reasoning === "high" ? 4 : 0);
+  if ((state.providerQuota[context.providerId] ?? 0) < 2 + setupQuota) return error(`${ticket.key} needs ${setupQuota} upfront provider quota${improveBrief ? " (5 for planning)" : ""} plus 2 usable quota to start; no work started or quota spent`);
   const provider = providerById.get(context.providerId);
   const eta = Math.max(1, Math.ceil(ticket.duration / model.speed));
+  const throttleCue = getQuotaThrottleCue(state, { sessionId: session.id, modelId: model.id, seconds: ticket.duration / model.speed, setupQuota });
   return {
-    messages: [output(`${provider?.shortName ?? "CLI"} · ${ticket.key} → session ${session.id + 1} / ${model.name}${improveBrief ? " / plan first (5 upfront quota)" : ""}${reasoning !== "medium" ? ` / ${reasoning} reasoning${reasoning === "high" ? " (4 extra upfront quota)" : " (+7 review risk)"}` : ""} · review ~${eta}s${state.sessions.some((candidate) => candidate.status === "working" || candidate.status === "quota-paused") && !state.purchasedUpgradeIds.includes("worktree-isolation") ? " · overlapping work shares the branch; contention adds review risk" : ""}`, "muted")],
+    messages: [output(`${provider?.shortName ?? "CLI"} · ${ticket.key} → session ${session.id + 1} / ${model.name}${improveBrief ? " / plan first (5 upfront quota)" : ""}${reasoning === "high" ? " / high reasoning (4 extra upfront quota)" : ""} · ~${eta}s work at full speed${state.sessions.some((candidate) => candidate.status === "working" || candidate.status === "quota-paused") && !state.purchasedUpgradeIds.includes("worktree-isolation") ? " · overlapping work shares the branch; contention adds review risk" : ""}${constraints.improveBrief ? "\nAccepted: telemetry off by default. The clarified brief includes disabled-default and migration-fixture checks; evidence arrives after completed work and still must pass review." : ""}${throttleCue ? `\n${throttleCue.message}` : ""}`, "muted")],
     effect: { type: "assign", sessionId: session.id, ticketId: ticket.id, modelId: model.id, improveBrief, reasoning },
   } satisfies CliResult;
+}
+
+function taskConstraints(raw: string, key: string, ticketId: string): { improveBrief?: boolean; clarification?: string } {
+  if (/\b(?:or|either|maybe|perhaps)\b/i.test(raw)) return { clarification: `Choose one definite instruction for ${key} before I start.` };
+  const defaultMention = /\b(?:default|telemetry\s+(?:off|on|disabled|enabled))\b/i.test(raw);
+  const fixture = /\b(?:migration(?:[-\s]+(?:fixture|test|check))?|fixtures?)\b/i.test(raw);
+  const off = /\b(?:(?:off|disabled)[-\s]+(?:by\s+)?default|default(?:s|ed)?\s+(?:to\s+|is\s+|must\s+be\s+)?(?:off|disabled))\b/i.test(raw);
+  const on = /\b(?:telemetry\s+(?:on|enabled)|(?:on|enabled)\s+(?:by\s+)?default|default(?:s|ed)?\s+(?:to\s+|is\s+|must\s+be\s+)?(?:on|enabled))\b/i.test(raw);
+  const ambiguous = /\b(?:not|never|don['’]t|do\s+not)\s+(?:off|disabled|on|enabled)|\b(?:or|either|maybe|perhaps)\b/i.test(raw);
+  if ((defaultMention || fixture) && ticketId !== "telemetry-toggle") return { clarification: `I can apply the authored brief for ${key}; that extra acceptance constraint is not supported. Describe the intended scope before I start.` };
+  if (defaultMention || fixture) {
+    if (ambiguous || on || (defaultMention && !off)) return { clarification: "Choose a telemetry default explicitly. I can apply telemetry off by default with migration checks; conflicting or enabled defaults need clarification." };
+    if (fixture && !off) return { clarification: "The migration fixture needs a default choice. Should telemetry be off by default? No planning quota is charged until you choose." };
+  }
+  const suffix = raw.match(new RegExp(`\\b${key}\\b(.*)$`, "i"))?.[1]
+    ?? raw.split(/\b(?:with|without|but|while|using|ensure|ensuring|make\s+sure|so\s+that|and)\b/i).slice(1).join(" ");
+  if (suffix) {
+    const remaining = suffix.toLowerCase()
+      .replace(/\btelemetry\b|\b(?:off|disabled)[-\s]+(?:by\s+)?default\b|\bdefault(?:s|ed)?\s+(?:to\s+|is\s+|must\s+be\s+)?(?:off|disabled)\b|\bmigration(?:[-\s]+(?:fixture|test|check)s?)?\b|\bfixtures?\b/g, " ")
+      .replace(/\b(?:the|a|an|to|be|is|by|off|disabled|include|including|add|adding|checks?|tests?|please|also|with|and|plan|first|careful|carefully|brief)\b/g, " ")
+      .replace(/[\s,.!?]+/g, "").trim();
+    if (remaining) return { clarification: `I cannot apply every extra clause in that request. ${ticketId === "telemetry-toggle" ? "I can use telemetry off by default with migration checks. " : ""}Confirm the supported scope before I start.` };
+  }
+  return off ? { improveBrief: true } : {};
 }
 
 function reviseReview(state: GameState, reviewId: string, options?: CacheRevisionOptions): CliResult {
@@ -441,14 +487,16 @@ function reviseReview(state: GameState, reviewId: string, options?: CacheRevisio
   const ticket = ticketById.get(review.ticketId)!;
   if (options && ticket.id !== "cache-summary") return error("cache remedy and workflow choices apply only to PERF-204");
   if (options?.remedy === "bypass" && options.workflow) return error("bypass has no restoration workflow; omit --workflow");
-  const quote = getCacheRevisionQuote(state, review.id, options);
+  const revisionQuote = getRevisionQuote(state, review.id, options);
+  const quote = revisionQuote?.cache;
   if (quote?.helperNeeded && quote.helperSessionId === null) return error("isolated probes need a free unlocked supporting slot; use ledger or free a slot");
   const providerId = modelById.get(state.sessions[review.sessionId]?.modelId ?? "")?.providerId ?? "";
   if (quote && (state.providerQuota[providerId] ?? 0) < quote.setupQuota) return error(`ledger needs ${quote.setupQuota} provider quota upfront; use probes or wait for quota`);
   const habit = CACHE_PROVIDER_HABITS[providerId as keyof typeof CACHE_PROVIDER_HABITS];
-  const details = quote ? ` · ${quote.remedy}${quote.workflow ? ` / ${quote.workflow}` : ""} · ${quote.seconds}s work · ${quote.setupQuota} upfront quota${quote.helperNeeded ? ` · supporting session ${quote.helperSessionId! + 1} at ${CACHE_DECISIONS.helperQuotaMultiplier * 100}% model quota rate` : " · no helper slot"}${quote.remedy === "bypass" ? ` · dashboard speed deferred; ${quote.rewardTrust}-trust reward, optional ${CACHE_DECISIONS.followup.key} follow-up` : " · dashboard speed retained"}${quote.fallbackReason ? ` · ${quote.fallbackReason}` : ""}${habit ? `\n${habit[quote.workflow ?? quote.remedy]}` : ""}` : "";
+  const throttleCue = revisionQuote ? getQuotaThrottleCue(state, { sessionId: review.sessionId, modelId: state.sessions[review.sessionId]?.modelId ?? "", seconds: revisionQuote.seconds, setupQuota: revisionQuote.setupQuota, helperNeeded: quote?.helperNeeded }) : null;
+  const details = quote ? ` · ${quote.remedy}${quote.workflow ? ` / ${quote.workflow}` : ""} · ${quote.seconds}s work · ${quote.setupQuota} upfront quota${quote.helperNeeded ? ` · supporting session ${quote.helperSessionId! + 1} at ${CACHE_DECISIONS.helperQuotaMultiplier * 100}% model quota rate` : " · no helper slot"}${quote.remedy === "bypass" ? ` · dashboard speed deferred; ${quote.rewardTrust}-trust reward, optional ${CACHE_DECISIONS.followup.key} follow-up` : " · dashboard speed retained"}${quote.fallbackReason ? ` · ${quote.fallbackReason}` : ""}${habit ? `\n${habit[quote.workflow ?? quote.remedy]}` : ""}` : revisionQuote ? ` · ${revisionQuote.finding} · ${workSeconds(revisionQuote.seconds)}s work · ${revisionQuote.setupQuota} upfront provider quota · +${revisionQuote.contextGain} context` : "";
   return {
-    messages: [output(`review.revise · ${ticket.key} · revision runs in session ${review.sessionId + 1}; use agents list to track it${details}`, "muted")],
+    messages: [output(`review.revise · ${ticket.key} · revision runs in session ${review.sessionId + 1}; use agents list to track it${details}${revisionQuote ? `\nOngoing quota: owner ${revisionQuote.quotaRate.toFixed(1)} quota/work-second${revisionQuote.helperQuotaRate ? `; helper ${revisionQuote.helperQuotaRate.toFixed(1)} quota/work-second` : ""}; separate from upfront setup.` : ""}${throttleCue ? `\n${throttleCue.message}` : ""}`, "muted")],
     effect: { type: "review", reviewId, decision: "revise", ...(options ? { options } : {}) },
   };
 }
@@ -493,8 +541,27 @@ function naturalCacheChoice(raw: string): { options: CacheRevisionOptions; ambig
   };
 }
 
+function naturalSessionControl(raw: string, state: GameState, context: CliContext): CliResult | undefined {
+  if (/^\s*(?:please\s+)?use\s+(?:(?:a|an|the)\s+)?(?:contract\s+ledger|isolated\s+probes|ledger|probes)\b/i.test(raw)) return undefined;
+  const prefix = "^\\s*(?:(?:please|let'?s)\\s+|(?:can|could|would)\\s+you\\s+(?:please\\s+)?)?";
+  const modelRequest = new RegExp(`${prefix}(?:switch|change|select|use)\\s+(?:(?:the|my|active)\\s+)?(?:model\\s+)?(?:to\\s+)?([a-z][a-z0-9-]*)\\b`, "i").exec(raw);
+  const planRequest = new RegExp(`${prefix}(?:plan\\s+(?:the\\s+)?(?:next|future)\\s+(?:ticket|assignment)|(?:enable|turn\\s+on|use)\\s+plan(?:ning)?(?:\\s+(?:mode|permissions?))?)\\b`, "i").exec(raw);
+  const reasoningRequest = new RegExp(`${prefix}(?:use|select|set|switch\\s+to)\\s+(low|medium|high)\\s+reasoning\\b`, "i").exec(raw);
+  if (modelRequest && /^(?:ledger|probes|isolated|contract|cache|invalidation)$/i.test(modelRequest[1]) && !planRequest && !reasoningRequest) return undefined;
+  if (!modelRequest && !planRequest && !reasoningRequest) return undefined;
+  const match = reasoningRequest ?? planRequest ?? modelRequest!;
+  const remainder = raw.slice(match[0].length).replace(/[\s.!?]+/g, "");
+  if (remainder) return { messages: [output(`No configuration or work changed: this compound request needs separate instructions. ${modelRequest ? `Use /model ${modelRequest[1].toLowerCase()} for this provider's model. ` : ""}${planRequest || /\bplan\b/i.test(raw) ? "Use /permissions plan to clarify future assignments for 5 quota each. " : ""}Then ask me to take the named ticket; unsupported clauses need clarification.`, "muted")] };
+  if (reasoningRequest) return evaluateCommand(`/reasoning ${reasoningRequest[1]}`, state, context);
+  if (planRequest) return evaluateCommand("/permissions plan", state, context);
+  return evaluateCommand(`/model ${modelRequest![1]}`, state, context);
+}
+
 function naturalLanguagePrompt(raw: string, state: GameState, context: CliContext): CliResult {
   const explicit = raw.match(/\b[A-Z]{2,10}-\d+\b/i)?.[0];
+  const namedTargets = [...new Set((raw.match(/\b[A-Z]{2,10}-\d+\b/gi) ?? []).map((key) => key.toUpperCase()))];
+  if (namedTargets.length > 1) return { messages: [output("No review decision made or work started. Choose one ticket so I do not silently act on only part of the request.", "muted")] };
+  if (explicit && !findTicket(explicit)) return { messages: [output(`No review decision made or work started. ${explicit.toUpperCase()} is not a known ticket; inspect the backlog and name the intended ticket.`, "muted")] };
   const candidateTickets = visibleTickets(state);
   const words = new Set((raw.toLowerCase().match(/[a-z]{4,}/g) ?? []).filter((word) => !["this", "that", "next", "first", "ticket", "work", "with", "from", "please", "could", "would", "should", "about", "change", "review"].includes(word)));
   const titleMatches = candidateTickets.map((ticket) => ({
@@ -505,13 +572,21 @@ function naturalLanguagePrompt(raw: string, state: GameState, context: CliContex
   const ticket = findTicket(explicit) ?? titleMatch;
   const reference = ticket?.key ?? explicit;
   const ready = availableTickets(state);
-  const pending = ticket ? state.reviews.find((review) => review.ticketId === ticket.id) : state.reviews.length === 1 ? state.reviews[0] : undefined;
+  const pending = explicit ? state.reviews.find((review) => review.ticketId === findTicket(explicit)?.id)
+    : ticket ? state.reviews.find((review) => review.ticketId === ticket.id) : state.reviews.length === 1 ? state.reviews[0] : undefined;
   const pendingKey = pending ? ticketById.get(pending.ticketId)?.key : undefined;
-  const inquiry = /^\s*(?:what|which|how|why|when|where|should\b|is\b|are\b|do\s+(?:I|we)\b|tell\s+me\b|show\s+me\b)/i.test(raw);
+  const inquiry = /^\s*(?:what|which|how|why|when|where|should\b|is\b|are\b|do\s+(?:I|we)\b|can\s+(?:I|we)\b|could\s+(?:I|we)\b|would\s+(?:I|we)\b|tell\s+me\b|show\s+me\b|explain\b)/i.test(raw);
+  if (inquiry && /\bupgrades?\b/i.test(raw)) return { messages: [output(`${upgrades(state)}\n\nSwitch to Terminal and use upgrades buy <ID> to purchase.`)] };
+  if (inquiry && /\b(?:telemetry|migration|default)\b/i.test(raw) && (!ticket || ticket.id === "telemetry-toggle") && !pending) return { messages: [output("For APP-118, I can clarify telemetry off by default with disabled-default and migration-fixture checks for 5 upfront provider quota on assignment. A fixture-only request still needs your default choice. No work or configuration changed; completed evidence must pass review.")] };
+  if (inquiry && /\b(?:plan|planning|permissions?)\b/i.test(raw) && !reference) return { messages: [output(`Current permission mode: ${context.permissionMode ?? "ask"}. /permissions plan clarifies each future assignment for 5 upfront provider quota; selecting it costs nothing now. Use /permissions ask to return to ordinary briefs.`)] };
+  if (inquiry && (/\b(?:models?|reasoning|switch)\b/i.test(raw) || content.models.some((model) => new RegExp(`\\b${model.id}\\b`, "i").test(raw))) && !reference) return { messages: [output(`${listModels(state, context)}${context.providerId === "openmind" ? "\nReasoning choices: medium (baseline) or high (4 extra upfront quota, −9 review risk)." : ""}`)] };
   const negatedWork = /\b(?:do\s+not|don['’]t|dont|never|avoid|should\s+not|shouldn['’]t|will\s+not|won['’]t)\s+(?:(?:want|need|plan|intend)\s+(?:(?:you|me|us)\s+)?(?:to\s+)?)?(?:please\s+)?(?:(?:you|me|us)\s+)?(?:work(?:ing)?|implement|start|begin|assign|touch|change|fix|ship|run|do(?:\s+(?:any\s+)?work)?)\b|\b(?:would\s+rather\s+not|rather\s+not)\s+(?:work(?:ing)?|implement|start|assign|touch|change|fix|ship|run)\b|\b(?:hold\s+off\s+on|refrain\s+from)\s+(?:work(?:ing)?|implement|starting|assigning|touching|changing|fixing|shipping|running)\b|\bdelay\s+(?:the\s+)?(?:work|working|implementation|start(?:ing)?|assignment|change|fix|ship(?:ping)?|run(?:ning)?)\b|\bpostpone\s+(?:the\s+)?(?:work|working|implementation|start(?:ing)?|assignment|change|fix|ship(?:ping)?|run(?:ning)?)\b|\bwait\s+(?:to\s+)?(?:work|start|begin|assign|implement|run)\b|\b(?:cannot|can\s+not|can['’]t|unable\s+to)\s+(?:work|start|begin|assign|implement|run)\b|\bnot\s+ready\s+to\s+(?:work|start|begin|assign|implement|run)\b|\bnot\s+yet\b/i;
   if (negatedWork.test(raw) || /\b(?:hold\s+off|refrain|delay|postpone|wait|not\s+ready|cannot|can['’]t)\b/i.test(raw)) {
     return { messages: [output(`No work started${reference ? ` for ${reference}` : ""}. Tell me when you're ready to pick it up.`, "muted")] };
   }
+  if (/\b(?:do\s+not|don['’]t|never|avoid)\b.*\b(?:switch|select|change|plan|reasoning|model)\b/i.test(raw)) return { messages: [output("No configuration or work changed. Ask when you want to select a model or enable planning.", "muted")] };
+  const control = !inquiry ? naturalSessionControl(raw, state, context) : undefined;
+  if (control) return control;
   const cacheIntent = /\b(?:invalidation|cache|ledger|probes)\b/i.test(raw);
   if (cacheIntent && /^\s*(?:please\s+)?(?:do\s+not|don['’]t|never|avoid)\b|\b(?:do\s+not|don['’]t)\s+want\b/i.test(raw)) return { messages: [output("No cache revision started. Ask when you want to choose a remedy or workflow.", "muted")] };
   const cacheReview = explicit ? state.reviews.find((review) => review.ticketId === findTicket(explicit)?.id) : state.reviews.find((review) => review.ticketId === "cache-summary");
@@ -520,17 +595,36 @@ function naturalLanguagePrompt(raw: string, state: GameState, context: CliContex
     || (raw.includes("?") && !/^\s*(?:can|could|would)\s+you\b/i.test(raw));
   if (cacheReview && cacheInquiry && (cacheIntent || /\b(?:what would|what will|what does|how much).*\b(?:take|cost)\b/i.test(raw))) return readReview(state, ticketById.get(cacheReview.ticketId)?.key);
   if (cacheIntent && cacheInquiry) return ticket ? readTicket(state, ticket.key, context) : { messages: [output("No cache revision started. I can explain restore versus bypass or ledger versus isolated probes when PERF-204 reaches review.", "muted")] };
+  const cacheClause = raw.replace(/\b[A-Z]{2,10}-\d+\b/gi, " ")
+    .replace(/\b(?:please|let'?s|can|could|would|you|i|we|want|need|like|to|restore|restoring|invalidation|bypass|bypassing|remove|cache|for|now|the|a|an|use|using|contract|ledger|isolated|probes|with|rather|than|instead|of|not|do|request|changes|revise|approve|merge|accept|ship|escalate|this|that|it|change|patch|review|ticket|on|without|again|another|pass|no|but|never|avoid|same|scope)\b/gi, " ")
+    .replace(/[\s,.!?;]+/g, "");
   const cacheChoice = naturalCacheChoice(raw);
-  if (cacheIntent && cacheChoice.ambiguous && !cacheInquiry) return { messages: [output("No cache revision started. Choose restore or bypass, and choose ledger or probes when restoring; I can explain either option.", "muted")] };
+  if (cacheIntent && (cacheChoice.ambiguous || /\b(?:or|either)\b/i.test(raw)) && !cacheInquiry) return { messages: [output("No cache revision started. Choose restore or bypass, and choose ledger or probes when restoring; I can explain either option.", "muted")] };
+  if (cacheReview && cacheIntent && !cacheInquiry && cacheClause) {
+    return { messages: [output("No review decision made. I won't ignore a condition or extra clause; inspect the evidence below and confirm the cache decision you intend.", "muted"), ...readReview(state, "PERF-204").messages] };
+  }
   if (cacheIntent && cacheAction && !cacheInquiry) {
     if (!cacheReview) return error("no pending cache review; inspect PERF-204 before choosing a remedy");
     const result = reviseReview(state, cacheReview.id, cacheChoice.options);
     return { ...result, messages: result.messages.map((message) => ({ ...message, text: message.text.replace("revision runs", "Revision runs") })) };
   }
   const reviewQuestion = /\b(reviews?|inspect|diff|changes?|changed|tests?|warning|approve|merge|ship|safe)\b/i.test(raw);
+  if (pendingKey && inquiry && /\b(?:what would|what will|what does|how much).*\b(?:take|cost)\b/i.test(raw)) return readReview(state, pendingKey);
+  const working = ticket ? state.sessions.find((session) => session.ticketId === ticket.id && (session.status === "working" || session.status === "quota-paused")) : visibleProviderSession(state, context.providerId, context.sessionId);
+  if (inquiry && working && working.status !== "awaiting-review" && (reviewQuestion || /\b(?:work|working|progress|doing|task|ticket)\b/i.test(raw))) {
+    const currentTicket = ticketById.get(working.ticketId ?? "");
+    return { messages: [output(`${currentTicket?.key ?? "Work"} · session ${working.id + 1} · ${working.status} · ${Math.round(working.progress * 100)}% complete. ${working.status === "quota-paused" ? "Work continues at the provider's quota regeneration rate. " : ""}No completed change or verification evidence is ready yet. Ask what changed once it reaches review; /status shows current progress.`)] };
+  }
   const reviewDecision = !(cacheIntent ? cacheInquiry : inquiry) && /^\s*(?:(?:please|let'?s)\s+)?(?:approve|merge|accept|ship|revise|request changes|escalate)\b/i.exec(raw)?.[0].toLowerCase();
   if (reviewDecision && (pending || reference)) {
     if (pending) {
+      const reviewClause = raw.slice(reviewDecision.length)
+        .replace(/\b[A-Z]{2,10}-\d+\b/gi, " ")
+        .replace(/\b(?:this|that|it|the|change|patch|review|ticket|now|please|for|on)\b/gi, " ")
+        .replace(/[\s,.!]+/g, "");
+      if (reviewClause && !(pending.ticketId === "cache-summary" && cacheIntent && !cacheClause)) {
+        return { messages: [output("No review decision made. I won't ignore a condition or extra clause; inspect the evidence below and confirm the decision you intend.", "muted"), ...readReview(state, pendingKey).messages] };
+      }
       const decision: ReviewDecision = /revise|request changes/.test(reviewDecision) ? "revise" : /escalate/.test(reviewDecision) ? "escalate" : "approve";
       if (decision === "revise") {
         const options: CacheRevisionOptions | undefined = pending.ticketId === "cache-summary" && cacheIntent && /\b(?:restore|bypass|remove|ledger|probes)\b/i.test(raw)
@@ -556,7 +650,7 @@ function naturalLanguagePrompt(raw: string, state: GameState, context: CliContex
   }
   const titleVerb = ticket?.title.split(" ")[0];
   const titleAction = titleVerb && new RegExp(`^\\s*(?:(?:please|let's)\\s+|(?:can|could|would)\\s+you\\s+)?${titleVerb}\\b`, "i").test(raw);
-  const affirmativeWork = !inquiry && (titleAction || /^\s*(?:please\s+)?(?:work\s+on|implement|start|begin|assign|take(?:\s+care\s+of)?|tackle|pick\s+up|handle|build|fix|ship|run|do)\b/i.test(raw)
+  const affirmativeWork = !inquiry && (titleAction || /^\s*(?:please\s+)?(?:plan|work\s+on|implement|start|begin|assign|take(?:\s+care\s+of)?|tackle|pick\s+up|handle|build|fix|ship|run|do)\b/i.test(raw)
     || /^\s*(?:can|could|would)\s+you\s+(?:please\s+)?(?:work\s+on|implement|start|begin|assign|take(?:\s+care\s+of)?|tackle|pick\s+up|handle|build|fix|ship|run|do)\b/i.test(raw)
     || /\b(?:I|we)\s+(?:want|need|would\s+like)\s+you\s+to\s+(?:work\s+on|implement|start|begin|assign|take(?:\s+care\s+of)?|tackle|pick\s+up|handle|build|fix|ship|run|do)\b/i.test(raw)
     || /^\s*let'?s\s+(?:work\s+on|implement|start|begin|take|tackle|pick\s+up|handle|build|fix|ship|do)\b/i.test(raw));
@@ -588,11 +682,11 @@ export function evaluateAgentMessage(raw: string, state: GameState, context: Cli
   if (trimmed.startsWith("/") || (terminalCommands.has(first) && !/[?]|\b(?:please|me|you|the|this|that|what|which|how|why|should|can|could|would|about)\b/i.test(trimmed))) {
     return evaluateCommand(trimmed, state, context);
   }
-  return naturalLanguagePrompt(trimmed, state, { ...defaultContext, ...context });
+  return naturalLanguagePrompt(trimmed, state, { ...defaultContext, ...context, modelId: context.modelId });
 }
 
 export function evaluateCommand(raw: string, state: GameState, suppliedContext: CliContext = defaultContext, strict = false): CliResult {
-  const context = { ...defaultContext, ...suppliedContext };
+  const context = { ...defaultContext, ...suppliedContext, modelId: suppliedContext.modelId };
   const tokens = raw.trim().split(/\s+/).filter(Boolean);
   const first = tokens[0]?.toLowerCase();
   const slashCommand = first?.startsWith("/") ? first.slice(1) : undefined;
@@ -645,9 +739,9 @@ export function evaluateCommand(raw: string, state: GameState, suppliedContext: 
   }
   if (command === "reasoning") {
     if (context.providerId !== "openmind") return error("reasoning controls are available in OpenMind Forge");
-    if (!subcommand) return { messages: [output(`reasoning effort: ${context.reasoning ?? "medium"}\nlow: +7 review risk · medium: baseline · high: -9 review risk and -4 setup quota`)] };
-    if (!["low", "medium", "high"].includes(subcommand)) return error("reasoning must be low, medium, or high");
-    return { messages: [output(`reasoning effort → ${subcommand}${subcommand === "high" ? "; the next assignment spends 4 extra upfront quota for −9 review risk" : subcommand === "low" ? "; the next assignment adds +7 review risk" : "; baseline review risk, no extra setup quota"}`, "success")], effect: { type: "reasoning", mode: subcommand as ReasoningMode } };
+    if (!subcommand) return { messages: [output(`reasoning effort: ${context.reasoning ?? "medium"}\nmedium: baseline · high: −9 review risk and 4 extra upfront quota${context.reasoning === "low" ? "\nLegacy low work keeps its original effort and results; choose medium or high for future assignments." : ""}`)] };
+    if (!["medium", "high"].includes(subcommand)) return error("reasoning choices are medium or high; low is a legacy effort only. No selection changed");
+    return { messages: [output(`reasoning effort → ${subcommand}${subcommand === "high" ? "; the next assignment spends 4 extra upfront quota for −9 review risk" : "; baseline review risk, no extra setup quota"}`, "success")], effect: { type: "reasoning", mode: subcommand as ReasoningMode } };
   }
   if (command === "init") {
     return { messages: [output("Repository guidance loaded\n\n  • use fictional providers and models\n  • preserve deterministic game rules\n  • run checks before shipping\n  • keep changes scoped to the active ticket", "success")] };
@@ -723,7 +817,7 @@ export function evaluateCommand(raw: string, state: GameState, suppliedContext: 
     if (subcommand === "buy") {
       const upgrade = upgradeById.get(tokens[2] ?? "");
       if (!upgrade) return error("upgrade not found; use `upgrades list`");
-      return { messages: [output(`requesting approval for ${upgrade.name}…`, "muted")], effect: { type: "purchase", upgradeId: upgrade.id } };
+      return { messages: [output(`Purchase request: ${upgrade.name} costs ${upgrade.cost} trust · current balance ${Math.round(state.trust)} trust · balance after successful purchase ${Math.round(state.trust - upgrade.cost)} trust${upgrade.id === "terminal-dashboard" ? "; open it with dashboard after purchase" : ""}.`, "muted")], effect: { type: "purchase", upgradeId: upgrade.id } };
     }
     return error("usage: upgrades <list|buy ID>");
   }
@@ -812,7 +906,7 @@ export function commandSuggestions(providerId: string, state?: GameState) {
     : [`reviews read ${reviewTicket.key}`, "reviews approve PERF-204", "agents list", "/usage"];
   if (reviewTicket) return ["/status", `reviews read ${reviewTicket.key}`, "reviews list", "events 5", "/usage"];
   if (session) return ["/status", "/context", ...(session.status === "awaiting-review" ? ["reviews list"] : ["/compact"]), "events 5", "/usage"];
-  if (nextTicket) return ["/status", "tickets list", `tickets read ${nextTicket.key}`, `agents run ${nextTicket.key}`, "/model"];
+  if (nextTicket) return ["/status", "tickets list", `tickets read ${nextTicket.key}`, `agents run ${nextTicket.key}`, state.purchasedUpgradeIds.includes("terminal-dashboard") ? "dashboard" : state.completedTicketIds.length >= 3 ? "pane split quota" : "/model"];
   return ["/status", "tickets list", "upgrades list", "events 5", "mux"];
 }
 

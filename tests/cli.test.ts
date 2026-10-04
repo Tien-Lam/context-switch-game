@@ -272,7 +272,7 @@ describe("operator CLI", () => {
 
   it("turns an agent command into a deterministic game action", () => {
     const result = evaluateCommand("agents run APP-101 --model couplet --brief", createInitialState());
-    expect(result.messages[0].text).toContain("review ~3s");
+    expect(result.messages[0].text).toContain("~3s work at full speed");
     expect(result.effect).toEqual({
       type: "assign",
       sessionId: 0,
@@ -385,8 +385,8 @@ describe("operator CLI", () => {
     const low = evaluateCommand("tickets read APP-101", state, { providerId: "openmind", modelId: "spark", reasoning: "low" }).messages[0].text;
     const high = evaluateCommand("tickets read APP-101", state, { providerId: "openmind", modelId: "spark", reasoning: "high" }).messages[0].text;
 
-    expect(low).toContain("30-30% estimated with selected Spark and low reasoning");
-    expect(high).toContain("14-14% estimated with selected Spark and high reasoning");
+    expect(low).toContain("30-30% estimated for the selected model Spark and low reasoning");
+    expect(high).toContain("14-14% estimated for the selected model Spark and high reasoning");
   });
 
   it("includes purchased risk-reduction upgrades in review evidence", () => {

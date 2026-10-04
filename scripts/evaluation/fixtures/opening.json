@@ -1,0 +1,8 @@
+{
+  "id": "opening-two-shipments",
+  "policy": "revise",
+  "stopAfterShipments": 2,
+  "maxSeconds": 120,
+  "maxActions": 100,
+  "tickSeconds": 0.05
+}

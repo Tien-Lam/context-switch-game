@@ -279,6 +279,11 @@ export const tickets: TicketDefinition[] = [
       summary: "Built the release candidate and recorded unresolved risks.",
       tests: "Critical path passes; confidence depends on accumulated repository health.",
       signal: "The demo is a milestone, not the end of the release. Your review history follows you into production.",
+      resolution: {
+        summary: "Rechecked the demo release manifest, known-risk inventory and rollback after the additional pass.",
+        tests: "The additional pass completed the critical-path and rollback verification against current repository health.",
+        signal: "Aggregate readiness was rechecked; escaped incidents retain their existing repair status.",
+      },
     },
     riskFlag: "none",
   },
@@ -501,8 +506,13 @@ export const tickets: TicketDefinition[] = [
     files: ["release/manifest.ts", "ops/incident-log.md", "CHANGELOG.md"],
     evidence: {
       summary: "Prepared the release candidate and recorded the incident response.",
-      tests: "Contract, checkout, retry, and gateway checks pass.",
+      tests: "Release checks are recorded separately from outstanding incident risks.",
       signal: "Your review and mitigation choices are now part of the release record.",
+      resolution: {
+        summary: "Rechecked the production release manifest, incident record and rollback after the additional pass.",
+        tests: "The additional pass completed release-readiness and rollback verification against current repository health.",
+        signal: "Aggregate readiness was rechecked; named escaped incidents retain their existing repair status.",
+      },
     },
     riskFlag: "none",
     blockedByIncident: "request-loop",

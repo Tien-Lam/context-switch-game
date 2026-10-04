@@ -25,12 +25,14 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { content, modelById, providerById, ticketById } from "../content";
 import { BALANCE } from "../game/balance";
-import { getCacheReviewEvidence, getCacheRevisionQuote } from "../game/decisionDepth";
+import { getReviewEvidence, getRevisionQuote } from "../game/decisionDepth";
+import { RECEIPTS } from "../content/receipts";
 import { availableModels, availableTickets, isReviewBlocked, reviewRiskFactors, ticketProgressLabel, visibleTickets } from "../game/selectors";
 import type { GameState, SessionState } from "../game/types";
 import { useGameStore } from "../app/store";
 import { agentSuggestions, commandSuggestions, evaluateAgentMessage, evaluateCommand, type CliEffect, type CliMessage, type PaneMode, type PermissionMode, type ReasoningMode } from "./cli";
 import { completeShellInput, createVirtualFileSystem, displayShellPath, evaluateVirtualShell, SHELL_WORKSPACE, type VirtualFileSystem } from "./virtualShell";
+import { actionReceipt } from "./actionReceipt";
 
 const percent = (value: number) => `${Math.round(value)}%`;
 const clock = (seconds: number) => {
@@ -203,20 +205,19 @@ function ReviewQueue({ game }: { game: GameState }) {
         <div className="review-list">
           {game.reviews.map((item) => {
             const ticket = ticketById.get(item.ticketId)!;
-            const session = game.sessions[item.sessionId];
             const unresolvedFinding = isReviewBlocked(game, item);
             const riskLabel = unresolvedFinding ? "Blocked" : "Gate passed";
-            const resolution = ticket.riskFlag !== "none" && (session.reviewRound > 0 || (session.briefImproved && item.risk < 0.2)) ? ticket.evidence.resolution : undefined;
-            const cacheEvidence = getCacheReviewEvidence(game, item);
-            const cacheQuote = getCacheRevisionQuote(game, item.id, { remedy: "restore" });
+            const evidence = getReviewEvidence(game, item);
+            const revisionQuote = getRevisionQuote(game, item.id, { remedy: "restore" });
+            const cacheQuote = revisionQuote?.cache;
             return (
               <article className="review-card" key={item.id}>
                 <div className="review-top"><div><span className="eyebrow">{ticket.key}</span><h3>{ticket.title}</h3></div><span className={`risk ${unresolvedFinding ? "risk-high-risk" : "risk-low-risk"}`}>{riskLabel} · {Math.round(item.risk * 100)}/100</span></div>
-                <p>{cacheEvidence?.summary ?? resolution?.summary ?? (session.reviewRound > 0 ? `Revised: ${ticket.evidence.summary}` : ticket.evidence.summary)}</p>
-                <ul className="evidence-list"><li><Check />{cacheEvidence?.tests ?? resolution?.tests ?? ticket.evidence.tests}</li><li><AlertTriangle />{cacheEvidence?.signal ?? resolution?.signal ?? ticket.evidence.signal}</li><li><FileCode2 />{cacheEvidence?.scope ?? ticket.files.join(" · ")}</li><li><CircleGauge />Risk: {reviewRiskFactors(game, item)}</li></ul>
+                <p>{evidence?.summary ?? ticket.evidence.summary}</p>
+                <ul className="evidence-list"><li><Check />{evidence?.tests ?? ticket.evidence.tests}</li><li><AlertTriangle />{evidence?.signal ?? ticket.evidence.signal}</li><li><FileCode2 />{evidence?.scope ?? ticket.files.join(" · ")}</li><li><CircleGauge />Risk: {reviewRiskFactors(game, item)}</li></ul>
                 <div className="review-actions">
                   <button onClick={() => review(item.id, "approve")}><Check />Approve <span>{unresolvedFinding ? item.risk >= 0.6 ? "high-risk change" : "known defect" : "ship now"}</span></button>
-                  <button onClick={() => review(item.id, "revise", cacheQuote ? { remedy: "restore" } : undefined)}><RefreshCcw />{cacheQuote ? "Restore invalidation" : "Revise"} <span>{cacheQuote ? `${cacheQuote.workflow} · ${cacheQuote.seconds}s · ${cacheQuote.setupQuota} setup quota${cacheQuote.helperNeeded ? " · helper slot" : ""}` : "resolve finding"}</span></button>
+                  <button onClick={() => review(item.id, "revise", cacheQuote ? { remedy: "restore" } : undefined)}><RefreshCcw />{cacheQuote ? "Restore invalidation" : "Revise"} <span>{revisionQuote ? `${revisionQuote.seconds.toFixed(1)} work-seconds · ${revisionQuote.setupQuota} setup quota · ${revisionQuote.quotaRate + revisionQuote.helperQuotaRate} quota/work-second${cacheQuote?.helperNeeded ? " · helper slot" : ""}` : "resolve finding"}</span></button>
                   {cacheQuote && <button onClick={() => review(item.id, "revise", { remedy: "bypass" })}><RefreshCcw />Bypass cache <span>fresh but slow · reduced reward · optional follow-up</span></button>}
                   <button disabled={game.trust < BALANCE.escalationTrustCost} onClick={() => review(item.id, "escalate")}><Sparkles />Escalate <span>{game.trust >= BALANCE.escalationTrustCost ? `+4 health · −${BALANCE.escalationTrustCost} trust` : `need ${BALANCE.escalationTrustCost} trust`}</span></button>
                 </div>
@@ -346,8 +347,12 @@ interface TerminalTabState {
   shellCommandCursor: number;
 }
 
-let terminalLineId = 0;
-let terminalTabId = 1;
+let terminalLineId: number = import.meta.hot?.data.terminalLineId ?? 0;
+let terminalTabId: number = import.meta.hot?.data.terminalTabId ?? 1;
+if (import.meta.hot) import.meta.hot.dispose((data) => {
+  data.terminalLineId = terminalLineId;
+  data.terminalTabId = terminalTabId;
+});
 const terminalLine = (kind: TerminalLineKind, text: string): TerminalLine => ({ id: terminalLineId += 1, kind, text });
 
 function readLocal(key: string) {
@@ -436,7 +441,18 @@ function loadTerminalTabs() {
       const highest = Math.max(...parsed.map((tab) => Number(tab.id.split("-")[1]) || 0));
       terminalTabId = highest + 1;
       terminalLineId = Math.max(terminalLineId, ...parsed.flatMap((tab) => [...tab.history, ...(tab.shellHistory ?? [])].map((line) => line.id || 0)));
-      return parsed.slice(0, 8).map((tab) => ({ ...tab, cwd: tab.cwd ?? SHELL_WORKSPACE }));
+      const seenIds = new Set<string>();
+      return parsed.slice(0, 8).map((tab) => {
+        const id = seenIds.has(tab.id) ? `term-${terminalTabId++}` : tab.id;
+        seenIds.add(id);
+        return {
+          ...tab, id, cwd: tab.cwd ?? SHELL_WORKSPACE,
+          reasoning: tab.reasoning === "low" ? "medium" as const : tab.reasoning,
+          history: tab.reasoning === "low" ? [...tab.history, terminalLine("muted", RECEIPTS.restoredReasoning)] : tab.history,
+          shellHistory: tab.reasoning === "low" && tab.surface === "shell"
+            ? [...(tab.shellHistory ?? []), terminalLine("muted", RECEIPTS.restoredReasoning)] : tab.shellHistory,
+        };
+      });
     }
   } catch {
     // A broken terminal layout should never block the game save.
@@ -630,6 +646,7 @@ export function App() {
 
   const applyEffect = async (effect: CliEffect, tabId: string, surface: "agent" | "shell") => {
     const store = useGameStore.getState();
+    const before = store.game;
     let failure: string | null = null;
     if (effect.type === "assign") failure = store.assign(effect.sessionId, effect.ticketId, effect.modelId, effect.improveBrief, effect.reasoning);
     if (effect.type === "assign" && !failure) {
@@ -673,7 +690,10 @@ export function App() {
     if (effect.type === "import") importInputRef.current?.click();
     if (effect.type === "restart") await restartRun();
     if (failure) appendLines(tabId, [terminalLine("error", `${surface === "shell" ? "error: " : ""}${failure}`)], surface);
-    else if (["assign", "review", "compact", "purchase", "mitigate"].includes(effect.type)) appendLines(tabId, [terminalLine("success", surface === "shell" ? "ok" : "On it.")], surface);
+    else {
+      const receipt = actionReceipt(effect, before, useGameStore.getState().game);
+      if (receipt) appendLines(tabId, [terminalLine("success", receipt)], surface);
+    }
   };
 
   const execute = async (raw: string, tabId = activeTabId, requestedSurface?: "agent" | "shell") => {
@@ -970,7 +990,7 @@ export function App() {
 
         <footer className={`mux-statusbar status-${currentTab.providerId ?? currentTab.kind}`}>
           <div className="mux-session-list">{tabs.map((tab, index) => <button className={tab.id === activeTabId ? "active" : ""} onClick={() => setActiveTabId(tab.id)} key={tab.id}>{index + 1}:{tab.name}{tab.id === activeTabId ? "*" : ""}</button>)}</div>
-          <div>{currentTab.kind === "provider" ? currentTab.providerId ? <><span>{currentSession?.ticketId ? `${ticketById.get(currentSession.ticketId)?.key} ${currentSession.status}` : "idle"} · {currentModel?.name} {currentTab.providerId === "openmind" ? currentTab.reasoning : currentTab.permissionMode}</span><span>{quotaRemaining} quota</span><span>{contextRemaining}% context</span></> : <span>shell · type anthill or forge</span> : <span>{operationsUnlocked ? `full-window:${currentTab.view}` : "operations locked"}</span>}{secondaryTab && <span>split:{secondaryTab.name}</span>}<span>ctrl-tab next</span></div>
+          <div>{currentTab.kind === "provider" ? currentTab.providerId ? <><span>{currentSession?.ticketId ? `${ticketById.get(currentSession.ticketId)?.key} ${currentSession.status}${currentSession.reasoning !== currentTab.reasoning ? ` · active ${currentSession.reasoning} effort` : ""}` : "idle"} · {currentModel?.name} {currentTab.providerId === "openmind" ? `next ${currentTab.reasoning ?? "medium"}` : currentTab.permissionMode}</span><span>{quotaRemaining} quota</span><span>{contextRemaining}% context</span></> : <span>shell · type anthill or forge</span> : <span>{operationsUnlocked ? `full-window:${currentTab.view}` : "operations locked"}</span>}{secondaryTab && <span>split:{secondaryTab.name}</span>}<span>ctrl-tab next</span></div>
         </footer>
       </section>
 

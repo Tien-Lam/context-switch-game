@@ -1,0 +1,7 @@
+{
+  "id": "release-risk-full-route",
+  "policy": "fastest",
+  "maxSeconds": 1200,
+  "maxActions": 2000,
+  "tickSeconds": 0.05
+}

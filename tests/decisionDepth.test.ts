@@ -281,7 +281,7 @@ describe("cache scope decisions and evidence workflows", () => {
     const shipped = reviewTicket(checked, review.id, "approve");
     expect(shipped.trust - checked.trust).toBe(5);
     expect(shipped.cacheOutcome).toBe("restored");
-    expect(computeEnding(shipped).scores.throughput).toBe(computeEnding(bypassed).scores.throughput);
+    expect(computeEnding(shipped).scores.throughput).toBe(computeEnding(bypassed).scores.throughput + CACHE_DECISIONS.scopeCredit.speedup);
     expect(computeEnding(shipped).scoreDetails!.throughput).toContain("2 main tickets");
     const slow = { ...shipped, gameTime: 300 };
     expect(computeEnding(slow).scores.throughput).toBeLessThan(computeEnding(shipped).scores.throughput);
