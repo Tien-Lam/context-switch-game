@@ -478,7 +478,7 @@ test("plays the scaled-incident recovery through the final release in the browse
   await expect(page.getByText(/FIX-502 is ready for review/)).toBeVisible({ timeout: 8_000 });
   await command.fill("reviews approve FIX-502");
   await command.press("Enter");
-  await expect(page.getByText("FIX-502 shipped")).toBeVisible();
+  await expect(page.locator(".line-event").filter({ hasText: "FIX-502 shipped" })).toBeVisible();
 
   await command.fill("work on SHIP-2");
   await command.press("Enter");

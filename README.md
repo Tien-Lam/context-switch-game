@@ -35,6 +35,12 @@ The current terminal is a deterministic game shell rendered by the existing Reac
 
 ## Pacing principle
 
+Agent conversations accept bounded authored constraints: for example, `Please take APP-118 with telemetry off by default` uses the planned brief for 5 upfront quota and reports the completed default/migration evidence at review. A fixture-only request asks you to choose the default first; unsupported compound or conditional decisions ask for clarification without changing work. Models can be selected conversationally, while exact shell syntax remains in Terminal.
+
+Reviews quote actual work-seconds, upfront charges and ongoing model/helper drain separately. Quota guidance explains shared-pool throttling when consequential; it is not a promise of elapsed time. Results appear in the invoking tab and background events remain with the owning session. Upgrade prices spend trust, and purchasing the dashboard shows its opening command without switching your view.
+
+Forge offers medium or high effort for new work. Legacy low-effort jobs retain their original results; restored terminal defaults move future assignments to medium. Final reviews retain outstanding incident evidence even after a release recheck. Endings distinguish prevention, successful repairs and remaining risks; the cache commitment's existing five throughput points split into four for freshness and one for speed, with optional PERF-205 restoring only the deferred speed point.
+
 Waiting is not the challenge. Normal-speed agent runs reach review in roughly 3–16 seconds, with the tutorial completing in about 3 seconds. Parallel execution unlocks after that first shipment. The pressure comes from switching providers before quota becomes a bottleneck, reviewing multiple changes, accepting risky shortcuts, and fixing the consequences quickly.
 
 The player is the human judgment in the loop, so there is no artificial attention or energy meter. Planning and compaction consume provider quota, revisions consume another agent pass, and escalation trades organizational trust and the ticket reward for an independent check that strengthens repository health. Approval is immediate: the decision comes from the displayed change summary, test result, warning signal, diff scope, review score, and explicit pass/blocked gate.
@@ -71,6 +77,8 @@ mise exec -- bun run test:e2e --project=desktop
 ```
 
 ## Architecture
+
+Developer-only policy replay tooling is documented in [scripts/evaluation/README.md](scripts/evaluation/README.md). `mise exec -- bun run evaluate suite --build <commit> --out /tmp/replays.json` records deterministic policies and outcomes locally. These metrics and agent judgments are evidence for specific hypotheses, not a human-fun score. The funded-compaction reservation experiment was rejected for its demonstrated recovery route; no reservation queue or new saved state ships.
 
 - `src/content`: validated providers, models, tickets, upgrades, and story copy.
 - `src/game`: serialisable state and deterministic simulation commands.

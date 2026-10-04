@@ -8,6 +8,7 @@ const WorkCostSchema = z.object({
 });
 
 export const CACHE_DECISIONS = z.object({
+  scopeCredit: z.object({ freshness: z.number().positive(), speedup: z.number().positive() }),
   ledger: WorkCostSchema,
   probes: WorkCostSchema,
   bypass: WorkCostSchema.extend({ rewardTrust: z.number().positive() }),
@@ -20,6 +21,7 @@ export const CACHE_DECISIONS = z.object({
   restoreRewardTrust: z.number().positive(),
   helperQuotaMultiplier: z.number().positive().max(1),
 }).parse({
+  scopeCredit: { freshness: 4, speedup: 1 },
   ledger: { seconds: 5, setupQuota: 3, contextGain: 12 },
   probes: { seconds: 3, setupQuota: 0, contextGain: 3 },
   bypass: { seconds: 1.5, setupQuota: 0, contextGain: 2, rewardTrust: 7 },
@@ -68,24 +70,24 @@ export const CACHE_EVIDENCE = z.record(z.enum(["ledger", "probes", "bypass", "fo
     summary: "Restored summary-key invalidation at every committed customer create, edit and delete boundary.",
     tests: "The write-boundary ledger accounts for every mutation; read-after-create, edit and delete freshness checks pass.",
     signal: "Each committed customer write invalidates its summary key. Cached reads retain the dashboard speedup.",
-    scope: "The original promise is preserved: fresh customer data and faster cached dashboard reads. +12 trust.",
+    scope: "The original promise is preserved: fresh customer data and faster cached dashboard reads. +12 trust. Release scope credit: 4 freshness + 1 speedup = 5/5.",
   },
   probes: {
     summary: "Restored invalidation at committed customer writes while a separate helper checked each mutation path.",
     tests: "The helper's isolated create, edit and delete probes pass, including a cached read before and a fresh read after each mutation.",
     signal: "The implementation now invalidates changed summaries; independent probes confirm freshness while repeated reads still use the cache.",
-    scope: "The original promise is preserved: fresh customer data and faster cached dashboard reads. +12 trust; a second slot and helper quota paid for the shorter pass.",
+    scope: "The original promise is preserved: fresh customer data and faster cached dashboard reads. +12 trust; a second slot and helper quota paid for the shorter pass. Release scope credit: 4 freshness + 1 speedup = 5/5.",
   },
   bypass: {
     summary: "Removed cached summary reads and read committed customer records directly.",
     tests: "Direct-read create, edit and delete freshness checks pass. The dashboard latency check confirms that the cache speedup is absent.",
     signal: "Customer data is fresh, but every dashboard read reaches the repository and is slower.",
-    scope: "Freshness is delivered; the dashboard performance promise is deferred. +7 trust now; optional PERF-205 can restore the speedup for +5 trust.",
+    scope: "Freshness is delivered; the dashboard performance promise is deferred. +7 trust now; optional PERF-205 can restore the speedup for +5 trust. Release scope credit: 4/5 freshness; 1 speedup point deferred independently of capped trust.",
   },
   followup: {
     summary: "Reintroduced cached summary reads with invalidation at every committed customer write.",
     tests: "Create, edit and delete freshness checks pass alongside cache-hit and dashboard latency checks.",
     signal: "The dashboard speedup is restored without reopening the stale-customer-data route.",
-    scope: "The performance promise deferred by the bypass is now delivered. +5 trust; this follow-up is optional for the release.",
+    scope: "The performance promise deferred by the bypass is now delivered. +5 trust; this follow-up is optional for the release. The deferred 1 speedup point completes the same 5/5 cache contribution once.",
   },
 });

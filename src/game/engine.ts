@@ -1,10 +1,13 @@
 import { produce } from "immer";
 import { content, modelById, providerById, ticketById, upgradeById } from "../content";
 import { CACHE_DECISIONS } from "../content/cacheDecisions";
+import { RELEASE_EVIDENCE } from "../content/releaseEvidence";
+import { cacheScopeScoreDetail, revisionCostReceipt, WORK_EVENTS } from "../content/workEvents";
 import { BALANCE } from "./balance";
-import { getCacheRevisionQuote } from "./decisionDepth";
+import { getCacheRevisionQuote, getCacheScopeCredit, getRevisionQuote } from "./decisionDepth";
 import { availableTickets, incidentIsOpen, isModelUnlocked, isReviewBlocked, reviewRiskFactorList } from "./selectors";
 import type { CacheRevisionOptions, EndingState, GameEvent, GameState, IncidentMitigation, ReviewDecision, SessionState } from "./types";
+import { sessionQuotaDemand, sessionWorkDuration } from "./work";
 
 export class GameRuleError extends Error {}
 
@@ -52,10 +55,6 @@ function releaseSupport(state: GameState, owner: SessionState) {
   }
 }
 
-function workDuration(session: SessionState, duration: number, speed: number) {
-  return session.workDuration ?? duration / speed;
-}
-
 function calculateReviewRisk(state: GameState, session: SessionState) {
   const ticket = ticketById.get(session.ticketId ?? "");
   const model = modelById.get(session.modelId ?? "");
@@ -87,14 +86,19 @@ export function computeEnding(state: GameState): EndingState {
     return !ticket?.incidentFor && !ticket?.optional;
   }).length;
   const elapsedTimePenalty = Math.max(0, (state.gameTime - 180) / 60);
+  const scope = getCacheScopeCredit(state);
   const throughput = clamp(Math.round(
-    mainTicketsShipped * 5 - state.stats.revisions * 1.5 - state.stats.escalations * 2.5
+    mainTicketsShipped * 5 - scope.deferred - state.stats.revisions * 1.5 - state.stats.escalations * 2.5
       - state.stats.defects * 5 - elapsedTimePenalty,
   ), 0, 100);
   const trust = clamp(Math.round(state.trust), 0, 100);
   const debt = clamp(Math.round(state.debt), 0, 100);
   const disciplined = reliability >= 78 && debt <= 20 && state.stats.defects <= 1;
-  const title = disciplined
+  const incidentFlags = content.tickets.flatMap((ticket) => ticket.incidentFor ? [ticket.incidentFor] : []);
+  const liveDefects = incidentFlags.some((flag) => incidentIsOpen(state, flag));
+  const repairedDefects = content.tickets.some((ticket) => ticket.incidentFor && state.completedTicketIds.includes(ticket.id));
+  const title = liveDefects ? RELEASE_EVIDENCE.recovery.openTitle
+    : repairedDefects ? RELEASE_EVIDENCE.recovery.repairedTitle : disciplined
     ? "The release works. Suspiciously well."
     : state.stats.defects >= 3
       ? "The release works. Legal has follow-up questions."
@@ -113,9 +117,10 @@ export function computeEnding(state: GameState): EndingState {
       ? `the retry loop was repaired ${state.incidentMitigation === "rollback" ? "after rolling back the feature" : state.incidentMitigation === "rate-limit" ? "after rate-limiting traffic" : state.incidentMitigation === "scale" ? "after scaling the gateway" : "before the gateway rollout"}`
       : "the gateway stayed healthy",
   ];
-  const message = `Your review history followed the release into production: ${consequences.join(", ")}.`;
+  const recovery = liveDefects ? RELEASE_EVIDENCE.recovery.open : repairedDefects ? RELEASE_EVIDENCE.recovery.repaired : RELEASE_EVIDENCE.recovery.prevented;
+  const message = `Your review history followed the release into production: ${consequences.join(", ")}. ${recovery}`;
   const scoreDetails = {
-    throughput: `${mainTicketsShipped} main tickets × 5 − ${state.stats.revisions} revisions × 1.5 − ${state.stats.escalations} escalations × 2.5 − ${state.stats.defects} escaped defects × 5 − ${Math.round(elapsedTimePenalty * 10) / 10} elapsed-time points (after a 180-second grace period; includes idle time and quota restocks).`,
+    throughput: `${mainTicketsShipped} main tickets × 5 − ${scope.deferred} undelivered cache scope points − ${state.stats.revisions} revisions × 1.5 − ${state.stats.escalations} escalations × 2.5 − ${state.stats.defects} escaped defects × 5 − ${Math.round(elapsedTimePenalty * 10) / 10} elapsed-time points (after a 180-second grace period; includes idle time and quota restocks). ${cacheScopeScoreDetail(scope)}`,
     reliability: `${Math.round(state.repoHealth)} repository health − ${state.stats.defects} escaped defects × 7.`,
     trust: "Current team trust after delivery, review, and incident decisions.",
     debt: "Current unresolved engineering debt after repairs.",
@@ -132,7 +137,7 @@ function unlockProgression(state: GameState) {
       tone: "good",
       title: `Session ${state.unlockedSessions} unlocked`,
       message: state.unlockedSessions === 3
-        ? "Three ready workstreams can now run together. Try `watch agents` or buy Workspace Isolation before they share a branch."
+        ? WORK_EVENTS.thirdSession
         : "Your throughput ceiling increased. Quota, context, and review quality now matter more.",
     });
   }
@@ -443,7 +448,7 @@ export function startTicket(
       sessionId,
       tone: "info",
       title: `${ticket.key} → ${model.name}`,
-      message: `${improveBrief ? "The agent clarified acceptance criteria before coding." : "The session started with the ticket exactly as written."} ${reasoning === "high" ? "High reasoning spent 4 extra quota for a lower review risk." : reasoning === "low" ? "Low reasoning saved setup quota but increased review risk." : ""} Estimated review in ${Math.max(1, Math.ceil(ticket.duration / model.speed))}s.`,
+      message: `${improveBrief ? "The agent clarified acceptance criteria before coding." : "The session started with the ticket exactly as written."} ${reasoning === "high" ? WORK_EVENTS.high : reasoning === "low" ? WORK_EVENTS.legacyLow : ""} ${Math.max(1, Math.ceil(ticket.duration / model.speed))} work-seconds at full speed.`,
     });
   });
 }
@@ -465,7 +470,7 @@ export function advanceGame(source: GameState, elapsedSeconds: number) {
       });
 
       const alreadyComplete = active.filter(({ session, ticket, model }) =>
-        (1 - session.progress) * workDuration(session, ticket.duration, model.speed) <= SIMULATION_EPSILON,
+        (1 - session.progress) * sessionWorkDuration(session, ticket.duration, model.speed) <= SIMULATION_EPSILON,
       );
       if (alreadyComplete.length) {
         for (const { session, ticket, model } of alreadyComplete) {
@@ -499,9 +504,7 @@ export function advanceGame(source: GameState, elapsedSeconds: number) {
       }
 
       const workFraction = new Map<string, number>();
-      const quotaDemand = ({ session, model }: (typeof active)[number]) => model.quotaRate * (
-        state.sessions.some((helper) => helper.status === "supporting" && helper.supportForSessionId === session.id) ? 1 + CACHE_DECISIONS.helperQuotaMultiplier : 1
-      );
+      const quotaDemand = ({ session }: (typeof active)[number]) => sessionQuotaDemand(state, session);
       let stepSeconds = remainingSeconds;
       for (const provider of content.providers) {
         const group = providerWork.get(provider.id) ?? [];
@@ -520,7 +523,7 @@ export function advanceGame(source: GameState, elapsedSeconds: number) {
         }
         if (fraction > 0) {
           for (const { session, ticket, model } of group) {
-            const workNeeded = (1 - session.progress) * workDuration(session, ticket.duration, model.speed);
+            const workNeeded = (1 - session.progress) * sessionWorkDuration(session, ticket.duration, model.speed);
             stepSeconds = Math.min(stepSeconds, workNeeded / fraction);
           }
         }
@@ -568,7 +571,7 @@ export function advanceGame(source: GameState, elapsedSeconds: number) {
           }
           session.status = constrained ? "quota-paused" : "working";
           const workSeconds = stepSeconds * fraction;
-          session.progress = clamp(session.progress + workSeconds / workDuration(session, ticket.duration, model.speed), 0, 1);
+          session.progress = clamp(session.progress + workSeconds / sessionWorkDuration(session, ticket.duration, model.speed), 0, 1);
           const decayMultiplier = hasUpgrade(state, "context-notes") ? 0.55 : 1;
           session.context = clamp(session.context - workSeconds * model.contextDecay * BALANCE.contextDecayPerWorkSecond * decayMultiplier, 0, 100);
         }
@@ -620,6 +623,7 @@ export function reviewTicket(source: GameState, reviewId: string, decision: Revi
     throw new GameRuleError("A bypass has no restoration workflow; omit ledger or probes.");
   }
   const quote = decision === "revise" ? getCacheRevisionQuote(source, reviewId, options) : null;
+  const revisionQuote = decision === "revise" ? getRevisionQuote(source, reviewId, options) : null;
   if (quote?.helperNeeded && quote.helperSessionId === null) {
     throw new GameRuleError("Probes require one free unlocked supporting session; choose ledger or free a slot.");
   }
@@ -671,7 +675,7 @@ export function reviewTicket(source: GameState, reviewId: string, decision: Revi
       }
       session.progress = 0.62;
       session.context = clamp(session.context + 6, 0, 100);
-      addEvent(state, { providerId: modelById.get(session.modelId ?? "")?.providerId, sessionId: session.id, tone: "info", title: `${ticket.key} changes requested`, message: "The agent is addressing the visible risk with a narrower second pass." });
+      addEvent(state, { providerId: modelById.get(session.modelId ?? "")?.providerId, sessionId: session.id, tone: "info", title: `${ticket.key} changes requested`, message: `${RELEASE_EVIDENCE.revisionReceipt} ${revisionQuote ? revisionCostReceipt(revisionQuote) : ticket.evidence.signal}` });
       return;
     }
 
