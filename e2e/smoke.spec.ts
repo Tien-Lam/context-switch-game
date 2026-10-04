@@ -80,6 +80,12 @@ test("terminal reviews surface the new execution-slot unlock without switching t
   await terminal.fill("reviews approve APP-101");
   await terminal.press("Enter");
   await expect(page.locator(".terminal-output")).toContainText("Session 2 unlocked");
+  const shipmentEvents = page.locator(".terminal-output .line-event").filter({ hasText: "APP-101 shipped" });
+  await expect(shipmentEvents).toHaveCount(1);
+  await page.reload();
+  await expect(page.getByRole("textbox", { name: "Anthill Code command" })).toBeVisible();
+  await page.waitForTimeout(200); // Let hydration/event effects finish before counting restored lines.
+  await expect(shipmentEvents).toHaveCount(1);
   await expect(page.locator(".terminal-output")).toContainText("Both provider terminals can now run work");
 });
 

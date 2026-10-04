@@ -777,6 +777,9 @@ export function App() {
   useEffect(() => { writeLocal("context-switch-sound-v1", soundEnabled ? "on" : "off"); }, [soundEnabled]);
   useEffect(() => { writeLocal("context-switch-motion-v1", reduceMotion ? "reduce" : "auto"); }, [reduceMotion]);
   useEffect(() => {
+    // Seed from the hydrated run, not the temporary initial state: restored events
+    // already belong to the saved transcript and must not be replayed on reload.
+    if (!hydrated) return;
     const newest = game.events[0];
     if (!newest) return;
     if (lastEventId.current === null) { lastEventId.current = newest.id; return; }
@@ -810,7 +813,7 @@ export function App() {
         appendLines(target, [terminalLine("event", `[${event.tone}] ${event.title}\n${event.message}`)], destination?.surface ?? "shell");
       }
     }
-  }, [game.events, soundEnabled]);
+  }, [game.events, hydrated, soundEnabled]);
   useEffect(() => {
     for (const output of [outputRef.current, secondaryOutputRef.current]) {
       output?.scrollTo({
