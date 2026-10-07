@@ -123,7 +123,7 @@ Original summary: Gameplay improvements shipped and verified on GitHub Pages. Im
 
 **Imported Linear comment** · Tien Long Lam · 2026-10-04T17:56:24.270Z
 
-Evaluation protocol, all five charters, four baseline reports and the pickup index are committed locally as73afce2 (documentation only; clean worktree). Production game files remain e1c55d8 and no push/deployment occurred. `mise exec -- bun run check` passed153 tests/typecheck/build. TIE-351/352 Done;12 reviewed follow-ups Todo with six dependency edges; three owner streams documented. Candidate comparisons and second fresh browser policy remain open in TIE-365. Pickup index: `.agents/playtesters/reports/2026-10-05-pickup.md`; full evidence: https://linear.app/tienlam/document/baseline-gameplay-findings-and-agent-ready-improvement-backlog-7e40be713357.
+Evaluation protocol, all five charters, four baseline reports and the pickup index are committed locally as73afce2 (documentation only; clean worktree). Production game files remain e1c55d8 and no push/deployment occurred. `mise exec -- bun run check` passed153 tests/typecheck/build. TIE-351/352 Done;12 reviewed follow-ups Todo with six dependency edges; three owner streams documented. Candidate comparisons and second fresh browser policy remain open in TIE-365. Pickup index: `.agents/playtesters/reports/2026-10-05-pickup.md`; full evidence: https://github.com/Tien-Lam/context-switch-game/blob/main/docs/linear-migration/documents/e0a5b634-fcfe-4217-b732-32f4eb8c8196.md.
 
 <details>
 <summary>Comment provenance</summary>
