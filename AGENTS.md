@@ -9,3 +9,7 @@
 - Do not use real AI company, product, or model names in player-facing copy.
 - Run `mise exec -- bun run check` before marking implementation complete.
 - Reusable specialist playtest charters live in `.agents/playtesters/`. When a user asks to invoke one, create a clean-context sub-agent from the matching charter and keep playtests read-only unless fixes are explicitly authorized.
+
+## Work tracking
+
+Use GitHub Issues and the linked Project for scope, ownership, status and acceptance evidence. Follow docs/GITHUB_WORKFLOW.md. Historical Linear records and source aliases are preserved in docs/linear-migration/README.md.

@@ -1,0 +1,48 @@
+[
+  {
+    "id": "5bea01be-6777-438d-883c-b1350f4485a7",
+    "slugId": "2a3fe632e7c8",
+    "title": "Ship evidence-led agent gameplay and review fixes",
+    "number": 1,
+    "fullIdentifier": "Tien-Lam/context-switch-game#1",
+    "sourceBranch": "codex/evidence-gameplay-release",
+    "targetBranch": "main",
+    "status": "merged",
+    "mergeStatus": "merged",
+    "url": "https://github.com/Tien-Lam/context-switch-game/pull/1",
+    "appUrl": "https://linear.app/tienlam/review/ship-evidence-led-agent-gameplay-and-review-fixes-2a3fe632e7c8",
+    "headSha": "84a8b550fdb5e1178681f71ea8f51c2a454146fc",
+    "baseSha": "e1c55d840c5d0d82238a2efd74367fb66fa8a9b1",
+    "openedAt": "2026-10-04T18:20:06.000Z",
+    "updatedAt": "2026-10-04T18:25:25.226Z",
+    "diffStats": {
+      "fileCount": 49,
+      "additions": 2726,
+      "changes": 0,
+      "deletions": 82
+    },
+    "creator": {
+      "id": "9eae46f7-c527-49bc-8d6a-465118651013",
+      "name": "Tien Long Lam"
+    },
+    "reviewers": [],
+    "viewerReviewState": {
+      "currentDecision": null,
+      "isReviewRequested": false,
+      "isAskedToReviewAgain": false,
+      "requestedViaTeams": [],
+      "lastSubmittedDecision": null,
+      "lastSubmittedAt": null
+    },
+    "needsAttention": false,
+    "linkedIssues": [],
+    "stackedPullRequests": [],
+    "discussion": "reviews/5bea01be-6777-438d-883c-b1350f4485a7.md",
+    "commentMappings": [
+      {
+        "id": "746a8a2d-69bf-41ec-b41e-7f21363d1ebb",
+        "existing": "https://github.com/Tien-Lam/context-switch-game/pull/1#issuecomment-5983013596"
+      }
+    ]
+  }
+]

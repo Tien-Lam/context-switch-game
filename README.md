@@ -79,3 +79,7 @@ mise exec -- bun run test:e2e --project=desktop
 - `tests`: rule, scenario, and persistence tests.
 
 The simulation never reads the wall clock. The application passes explicit elapsed time, allowing normal play, background catch-up, and tests to use the same rules.
+
+## Work tracking
+
+[GitHub Issues](https://github.com/Tien-Lam/context-switch-game/issues) · [Project board](https://github.com/users/Tien-Lam/projects/2) · [Contribution workflow](docs/GITHUB_WORKFLOW.md) · [Migrated specifications and history](docs/linear-migration/README.md)
