@@ -90,4 +90,8 @@ The simulation never reads the wall clock. The application passes explicit elaps
 
 ## Work tracking
 
-[GitHub Issues](https://github.com/Tien-Lam/context-switch-game/issues) · [Project board](https://github.com/users/Tien-Lam/projects/2) · [Contribution workflow](docs/GITHUB_WORKFLOW.md) · [Migrated specifications and history](docs/linear-migration/README.md)
+[GitHub Issues](https://github.com/Tien-Lam/context-switch-game/issues) · [GitHub Projects](https://github.com/users/Tien-Lam/projects/2) · [Contribution workflow](docs/GITHUB_WORKFLOW.md) · [Migrated specifications and history](docs/linear-migration/README.md)
+
+## Documentation and workflow
+
+Documentation stays in README.md and repository Markdown files, reviewed through GitHub Pull Requests. The [GitHub workflow](docs/GITHUB_WORKFLOW.md) names the products used for tracking, review, checks and releases; the existing [GitHub Wiki](https://github.com/Tien-Lam/context-switch-game/wiki) links to canonical docs.
