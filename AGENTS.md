@@ -12,4 +12,8 @@
 
 ## Work tracking
 
-Use GitHub Issues and the linked Project for scope, ownership, status and acceptance evidence. Follow docs/GITHUB_WORKFLOW.md. Historical Linear records and source aliases are preserved in docs/linear-migration/README.md.
+Use GitHub Issues and GitHub Projects for scope, ownership, status and acceptance evidence. Follow docs/GITHUB_WORKFLOW.md. Historical Linear records and source aliases are preserved in docs/linear-migration/README.md.
+
+## GitHub products and documentation
+
+Use GitHub Issues for scope and acceptance, GitHub Projects for status and priority, GitHub Pull Requests for review, GitHub Actions for automated verification and authorized publishing, and GitHub Releases for versioned releases. Keep README.md, AGENTS.md and repository Markdown docs canonical; an existing GitHub Wiki is a navigation index. Follow [the product map and documentation policy](docs/GITHUB_WORKFLOW.md).
